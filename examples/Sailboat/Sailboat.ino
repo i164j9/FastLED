@@ -172,7 +172,8 @@ void setup() {
 }
 
 void loop() {
-    FL_WARN("Loop");
+    //FL_WARN("Loop");
+    //delay(10);
     // Decay time-warp back to normal
     noiseTimeMultiplier *= 0.95f;
     if (noiseTimeMultiplier < 1.01f)
@@ -193,4 +194,5 @@ void loop() {
     // Draw current effect and show
     fxEngine.draw(millis(), leds);
     FastLED.show();
+    //delay(10);
 }
