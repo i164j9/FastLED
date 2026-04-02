@@ -648,7 +648,6 @@ public:
 	/// @param config Channel configuration (pin, timing, leds, rgb order, settings)
 	/// @returns Shared pointer to Channel (extends CLEDController), or nullptr if unsupported
 	/// @note Supported platforms: ESP32, ESP32-S2, ESP32-S3, ESP32-C3, ESP32-C6, ESP32-P4
-	/// @note MUST store return value to control lifetime - marked [[nodiscard]]
 	///
 	/// Example:
 	/// @code
@@ -659,7 +658,7 @@ public:
 	/// FastLED.show();
 	/// channel.reset();  // Destroy controller
 	/// @endcode
-	FL_NODISCARD static fl::ChannelPtr add(const fl::ChannelConfig& config);
+	static fl::ChannelPtr add(const fl::ChannelConfig& config);
 
 	/// @brief Add multiple LED channels from a config array
 	///
@@ -669,7 +668,6 @@ public:
 	/// @param configs Span of ChannelConfig objects
 	/// @returns Vector of ChannelPtrs (one per config), or empty elements if unsupported
 	/// @note Supported platforms: ESP32, ESP32-S2, ESP32-S3, ESP32-C3, ESP32-C6, ESP32-P4
-	/// @note MUST store return value to control lifetime - marked [[nodiscard]]
 	///
 	/// Example:
 	/// @code
@@ -680,7 +678,7 @@ public:
 	/// };
 	/// auto channels = FastLED.add(fl::span<const fl::ChannelConfig>(configs, 2));
 	/// @endcode
-	FL_NODISCARD static fl::vector<fl::ChannelPtr> add(fl::span<const fl::ChannelConfig> configs);
+	static fl::vector<fl::ChannelPtr> add(fl::span<const fl::ChannelConfig> configs);
 
 	/// @brief Add multiple LED channels from an initializer list
 	///
@@ -689,7 +687,6 @@ public:
 	///
 	/// @param configs Initializer list of ChannelConfig objects
 	/// @returns Vector of ChannelPtrs (one per config)
-	/// @note MUST store return value to control lifetime - marked [[nodiscard]]
 	///
 	/// Example:
 	/// @code
@@ -699,7 +696,7 @@ public:
 	///     fl::ChannelConfig(PIN2, timing, leds2, RGB)
 	/// });
 	/// @endcode
-	FL_NODISCARD static fl::vector<fl::ChannelPtr> add(fl::initializer_list<fl::ChannelConfig> configs);
+	static fl::vector<fl::ChannelPtr> add(fl::initializer_list<fl::ChannelConfig> configs);
 
 	/// @brief Add multiple LED channels from a MultiChannelConfig
 	///
@@ -709,7 +706,6 @@ public:
 	/// @param multiConfig MultiChannelConfig containing multiple channel configurations
 	/// @returns Vector of ChannelPtrs (one per config), or empty elements if unsupported
 	/// @note Supported platforms: ESP32, ESP32-S2, ESP32-S3, ESP32-C3, ESP32-C6, ESP32-P4
-	/// @note MUST store return value to control lifetime - marked [[nodiscard]]
 	///
 	/// Example:
 	/// @code
@@ -720,7 +716,7 @@ public:
 	/// };
 	/// auto channels = FastLED.add(multiConfig);
 	/// @endcode
-	FL_NODISCARD static fl::vector<fl::ChannelPtr> add(const fl::MultiChannelConfig& multiConfig);
+	static fl::vector<fl::ChannelPtr> add(const fl::MultiChannelConfig& multiConfig);
 
 	/// @brief Add an audio input and return an auto-pumped Processor
 	///
@@ -742,7 +738,7 @@ public:
 	/// audio->setGain(2.0f);  // Optional: amplify input
 	/// audio->onBeat([]{ /* pulse leds */ });
 	/// @endcode
-	FL_NODISCARD static fl::shared_ptr<fl::audio::Processor> add(const fl::audio::Config& config);
+	static fl::shared_ptr<fl::audio::Processor> add(const fl::audio::Config& config);
 
 	/// @brief Add a pre-created audio input and return an auto-pumped Processor
 	///
@@ -759,7 +755,7 @@ public:
 	/// auto audio = FastLED.add(fakeInput);
 	/// audio->onBeat([]{ /* test callback */ });
 	/// @endcode
-	FL_NODISCARD static fl::shared_ptr<fl::audio::Processor> add(fl::shared_ptr<fl::audio::IInput> input);
+	static fl::shared_ptr<fl::audio::Processor> add(fl::shared_ptr<fl::audio::IInput> input);
 
 	/// @brief Add a UIAudio element and return an auto-pumped Processor
 	///

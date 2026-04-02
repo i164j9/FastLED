@@ -15,9 +15,11 @@ namespace fl {
 // - On platforms with FASTLED_ALL_PINS_VALID (stub, WASM): build a static
 //   table of FastPin<0..31>::port() pointers and compare them. Since stub
 //   returns nullptr for all, we fall back to pin / 32 grouping.
-// - On real platforms (AVR, ESP32, ARM): FastPin<N> has a static_assert for
-//   invalid pins, so we can't instantiate all 32 entries. Instead, use the
-//   platform's digitalPinToPort() macro which is already available.
+// - On platforms with FASTLED_NO_PINMAP (Apollo3, Renesas, Giga, NRF51,
+//   STM32, RP2040): digitalPinToPort() is unavailable, so fall back to
+//   grouping pins by blocks of 32.
+// - On real platforms with pin maps (AVR, ESP32, SAM): use the platform's
+//   digitalPinToPort() macro which is already available.
 
 #ifdef FASTLED_ALL_PINS_VALID
 
@@ -97,7 +99,17 @@ int pinToPort(int pin) {
     return pin / 32;
 }
 
-#else // !FASTLED_ALL_PINS_VALID — real platforms (AVR, ESP32, ARM)
+#elif defined(FASTLED_NO_PINMAP)
+
+// Platforms that define FASTLED_NO_PINMAP (Apollo3, Renesas, Giga, NRF51,
+// STM32, RP2040) don't provide digitalPinToPort(). Fall back to grouping
+// pins by blocks of 32.
+int pinToPort(int pin) {
+    if (pin < 0) return -1;
+    return pin / 32;
+}
+
+#else // Real platforms with pin maps (AVR, ESP32, SAM, etc.)
 
 namespace {
 // Convert digitalPinToPort() result to int. Most platforms return integers;
