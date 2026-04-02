@@ -24,6 +24,9 @@
 #include "fl/math/simd.h"
 #endif
 
+// Force O3 even in debug builds so blur benchmarks don't hit watchdog timeouts.
+FL_OPTIMIZATION_LEVEL_O3_BEGIN
+
 // Legacy XY function. This is a weak symbol that can be overridden by the user.
 // IMPORTANT: This MUST be in the global namespace (not fl::) for backward compatibility
 // with user code from FastLED 3.7.6 that defines: uint16_t XY(uint8_t x, uint8_t y)
@@ -1207,3 +1210,5 @@ BLUR_INST_F16(1, 2, CRGB16)  BLUR_INST_F16(2, 1, CRGB16)
 
 } // namespace gfx
 } // namespace fl
+
+FL_OPTIMIZATION_LEVEL_O3_END

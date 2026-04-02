@@ -20,6 +20,10 @@ def main() -> None:
         paths = get_runtime_dll_paths()
         for p in paths:
             print(p)
+    except KeyboardInterrupt as ki:
+        from ci.util.global_interrupt_handler import handle_keyboard_interrupt
+
+        handle_keyboard_interrupt(ki)
     except ImportError:
         # clang-tool-chain not installed — nothing to output
         pass

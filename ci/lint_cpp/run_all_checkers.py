@@ -51,10 +51,10 @@ from ci.lint_cpp.namespace_platforms_checker import NamespacePlatformsChecker
 from ci.lint_cpp.native_platform_defines_checker import NativePlatformDefinesChecker
 from ci.lint_cpp.no_namespace_fl_declaration import NamespaceFlDeclarationChecker
 from ci.lint_cpp.no_using_namespace_fl_in_headers import UsingNamespaceFlChecker
+from ci.lint_cpp.noexcept_special_members_checker import NoexceptSpecialMembersChecker
 from ci.lint_cpp.numeric_limit_macros_checker import NumericLimitMacroChecker
 from ci.lint_cpp.pch_file_checker import check as check_pch_files
 from ci.lint_cpp.platform_includes_checker import PlatformIncludesChecker
-from ci.lint_cpp.noexcept_special_members_checker import NoexceptSpecialMembersChecker
 from ci.lint_cpp.platform_pragma_checker import PlatformPragmaChecker
 from ci.lint_cpp.pragma_once_checker import PragmaOnceChecker
 from ci.lint_cpp.raw_noexcept_checker import RawNoexceptChecker

@@ -37,6 +37,7 @@ from pathlib import Path
 from ci.util.check_files import FileContent, FileContentChecker
 from ci.util.paths import PROJECT_ROOT
 
+
 # ── Regex patterns ──────────────────────────────────────────────────────────
 
 # Suppression comments
@@ -273,9 +274,7 @@ def _join_multiline_signature(lines: list[str], start: int) -> str | None:
     return None
 
 
-def signature_has_noexcept(
-    lines: list[str], start: int, open_paren: int
-) -> bool:
+def signature_has_noexcept(lines: list[str], start: int, open_paren: int) -> bool:
     """Return True if FL_NOEXCEPT / noexcept appears between ')' and body/';'."""
     close_line, close_col = _find_close_paren_multiline(lines, start, open_paren)
     if close_line < 0:
@@ -404,9 +403,7 @@ def _ensure_include(content: str) -> str:
     return "\n".join(lines)
 
 
-def fix_file(
-    path: Path, dry_run: bool = False
-) -> tuple[int, list[str]]:
+def fix_file(path: Path, dry_run: bool = False) -> tuple[int, list[str]]:
     """Fix missing FL_NOEXCEPT in *path*.
 
     Returns ``(number_of_fixes, list_of_descriptions)``.

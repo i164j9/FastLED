@@ -16,6 +16,7 @@ from ci.util.check_files import FileContent
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
+
 def _make_fc(path: str, content: str) -> FileContent:
     return FileContent(path=path, content=content, lines=content.splitlines())
 
@@ -308,23 +309,13 @@ class TestMultiLine:
         assert len(viols) == 0
 
     def test_multiline_params_missing(self):
-        code = (
-            "class Foo {\n"
-            "    Foo(\n"
-            "        const Foo& other);\n"
-            "};"
-        )
+        code = "class Foo {\n    Foo(\n        const Foo& other);\n};"
         viols = _check(code)
         # The opening line has the constructor start, closing ) is on line 3
         assert len(viols) == 1
 
     def test_multiline_params_has_noexcept(self):
-        code = (
-            "class Foo {\n"
-            "    Foo(\n"
-            "        const Foo& other) FL_NOEXCEPT;\n"
-            "};"
-        )
+        code = "class Foo {\n    Foo(\n        const Foo& other) FL_NOEXCEPT;\n};"
         viols = _check(code)
         assert len(viols) == 0
 
@@ -411,10 +402,7 @@ class TestEdgeCases:
         assert "destructor" in viols[0][1]
 
     def test_multiple_classes(self):
-        code = (
-            "class Foo {\n    ~Foo();\n};\n"
-            "class Bar {\n    ~Bar() FL_NOEXCEPT;\n};"
-        )
+        code = "class Foo {\n    ~Foo();\n};\nclass Bar {\n    ~Bar() FL_NOEXCEPT;\n};"
         viols = _check(code)
         assert len(viols) == 1
         assert "Foo" in viols[0][1]
@@ -503,8 +491,7 @@ class TestAutoFix:
     def test_fix_destructor(self, tmp_path):
         p = tmp_path / "test.h"
         p.write_text(
-            '#pragma once\n#include "fl/stl/noexcept.h"\n'
-            "class Foo {\n    ~Foo();\n};\n"
+            '#pragma once\n#include "fl/stl/noexcept.h"\nclass Foo {\n    ~Foo();\n};\n'
         )
         n, descs = fix_file(p)
         assert n == 1
@@ -559,7 +546,7 @@ class TestAutoFix:
         n, descs = fix_file(p)
         assert n == 1
         fixed = p.read_text()
-        assert 'fl/stl/noexcept.h' in fixed
+        assert "fl/stl/noexcept.h" in fixed
 
     def test_dry_run_no_change(self, tmp_path):
         p = tmp_path / "test.h"

@@ -1,4 +1,5 @@
 // IWYU pragma: private
+// ok no namespace fl
 
 /// @file platforms/esp/32/lwip_hooks.cpp.hpp
 /// @brief Provides required LwIP hooks for ESP32 with WiFi support
