@@ -75,6 +75,30 @@
 #endif
 #endif
 
+// Platforms that register real hardware channel drivers (clockless and/or SPI).
+// User-overridable: define before including FastLED.h to force on/off.
+#if !defined(FASTLED_HAS_CHANNELS)
+#if defined(FL_IS_ESP32) || defined(FL_IS_TEENSY_4X) || \
+    defined(FL_IS_RP) || defined(FL_IS_STM32) || \
+    defined(FL_IS_SAMD) || defined(FL_IS_NRF52)
+#define FASTLED_HAS_CHANNELS 1
+#else
+#define FASTLED_HAS_CHANNELS 0
+#endif
+#endif
+
+// Route SPI chipsets (APA102, SK9822, etc.) through the Channel API instead of
+// legacy APA102Controller/SPIOutput. Only enabled on platforms where
+// DATA_RATE_MHZ() returns Hz (not clock dividers) so that the SPI_DATA_RATE
+// template parameter can be passed directly to the channel encoder.
+#if !defined(FASTLED_SPI_USES_CHANNEL_API)
+#if FASTLED_HAS_CHANNELS && (defined(FL_IS_ESP32) || defined(FL_IS_TEENSY_4X))
+#define FASTLED_SPI_USES_CHANNEL_API 1
+#else
+#define FASTLED_SPI_USES_CHANNEL_API 0
+#endif
+#endif
+
 #ifndef __PROG_TYPES_COMPAT__
 /// avr-libc define to expose __progmem__ typedefs.
 /// @note These typedefs are now deprecated!
@@ -899,10 +923,63 @@ public:
 		return addLeds<WS2812, DATA_PIN, RGB_ORDER>(data, nLedsOrOffset, nLedsIfOffset);
 	}
 
+	#elif FASTLED_SPI_USES_CHANNEL_API
+
+	/// Add an SPI based CLEDController via Channel API.
+	template<ESPIChipsets CHIPSET, fl::u8 DATA_PIN, fl::u8 CLOCK_PIN, fl::EOrder RGB_ORDER, fl::u32 SPI_DATA_RATE>
+	::CLEDController &addLeds(CRGB *data, int nLedsOrOffset, int nLedsIfOffset = 0) {
+		int nOffset = (nLedsIfOffset > 0) ? nLedsOrOffset : 0;
+		int nLeds = (nLedsIfOffset > 0) ? nLedsIfOffset : nLedsOrOffset;
+		fl::SpiEncoder encoder = fl::SpiEncoder::spiEncoderForChipset(
+			static_cast<fl::SpiChipset>(CHIPSET), SPI_DATA_RATE);
+		fl::SpiChipsetConfig spiCfg(DATA_PIN, CLOCK_PIN, encoder);
+		fl::ChannelConfig config(spiCfg, fl::span<CRGB>(data + nOffset, nLeds), RGB_ORDER);
+		static fl::ChannelPtr sChannel;
+		if (!sChannel) {
+			sChannel = add(config);
+		}
+		return *sChannel;
+	}
+
+	/// Add an SPI based CLEDController via Channel API (default RGB order and speed).
+	template<ESPIChipsets CHIPSET, fl::u8 DATA_PIN, fl::u8 CLOCK_PIN>
+	static ::CLEDController &addLeds(CRGB *data, int nLedsOrOffset, int nLedsIfOffset = 0) {
+		int nOffset = (nLedsIfOffset > 0) ? nLedsOrOffset : 0;
+		int nLeds = (nLedsIfOffset > 0) ? nLedsIfOffset : nLedsOrOffset;
+		fl::SpiEncoder encoder = fl::SpiEncoder::spiEncoderForChipset(
+			static_cast<fl::SpiChipset>(CHIPSET));
+		fl::SpiChipsetConfig spiCfg(DATA_PIN, CLOCK_PIN, encoder);
+		// HD108 defaults to GRB; all other SPI chipsets default to RGB.
+		constexpr fl::EOrder order =
+			(static_cast<fl::SpiChipset>(CHIPSET) == fl::SpiChipset::HD108)
+				? GRB : RGB;
+		fl::ChannelConfig config(spiCfg, fl::span<CRGB>(data + nOffset, nLeds), order);
+		static fl::ChannelPtr sChannel;
+		if (!sChannel) {
+			sChannel = add(config);
+		}
+		return *sChannel;
+	}
+
+	/// Add an SPI based CLEDController via Channel API (default speed).
+	template<ESPIChipsets CHIPSET, fl::u8 DATA_PIN, fl::u8 CLOCK_PIN, fl::EOrder RGB_ORDER>
+	::CLEDController& addLeds(CRGB* data, int nLedsOrOffset, int nLedsIfOffset = 0) {
+		int nOffset = (nLedsIfOffset > 0) ? nLedsOrOffset : 0;
+		int nLeds = (nLedsIfOffset > 0) ? nLedsIfOffset : nLedsOrOffset;
+		fl::SpiEncoder encoder = fl::SpiEncoder::spiEncoderForChipset(
+			static_cast<fl::SpiChipset>(CHIPSET));
+		fl::SpiChipsetConfig spiCfg(DATA_PIN, CLOCK_PIN, encoder);
+		fl::ChannelConfig config(spiCfg, fl::span<CRGB>(data + nOffset, nLeds), RGB_ORDER);
+		static fl::ChannelPtr sChannel;
+		if (!sChannel) {
+			sChannel = add(config);
+		}
+		return *sChannel;
+	}
+
 	#else
 
-
-	/// Add an SPI based CLEDController instance to the world.
+	/// Add an SPI based CLEDController instance to the world (legacy path).
 	template<ESPIChipsets CHIPSET, fl::u8 DATA_PIN, fl::u8 CLOCK_PIN, fl::EOrder RGB_ORDER, fl::u32 SPI_DATA_RATE > ::CLEDController &addLeds(CRGB *data, int nLedsOrOffset, int nLedsIfOffset = 0) {
 		// Instantiate the controller using ClockedChipsetHelper
 		typedef ClockedChipsetHelper<CHIPSET, DATA_PIN, CLOCK_PIN> CHIP;
@@ -912,7 +989,7 @@ public:
 		return addLeds(&c, data, nLedsOrOffset, nLedsIfOffset);
 	}
 
-	/// Add an SPI based CLEDController instance to the world.
+	/// Add an SPI based CLEDController instance to the world (legacy path).
 	template<ESPIChipsets CHIPSET, fl::u8 DATA_PIN, fl::u8 CLOCK_PIN > static ::CLEDController &addLeds(CRGB *data, int nLedsOrOffset, int nLedsIfOffset = 0) {
 		typedef ClockedChipsetHelper<CHIPSET, DATA_PIN, CLOCK_PIN> CHIP;
 		typedef typename CHIP::ControllerType ControllerType;
@@ -921,8 +998,7 @@ public:
 		return addLeds(&c, data, nLedsOrOffset, nLedsIfOffset);
 	}
 
-
-	// The addLeds function using ChipsetHelper
+	/// Add an SPI based CLEDController instance to the world (legacy path).
 	template<ESPIChipsets CHIPSET, fl::u8 DATA_PIN, fl::u8 CLOCK_PIN, fl::EOrder RGB_ORDER>
 	::CLEDController& addLeds(CRGB* data, int nLedsOrOffset, int nLedsIfOffset = 0) {
 		typedef ClockedChipsetHelper<CHIPSET, DATA_PIN, CLOCK_PIN> CHIP;

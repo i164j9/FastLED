@@ -479,4 +479,660 @@ FL_TEST_CASE("ChannelManager - predicate filtering (SPI accepted)") {
 
 #endif  // End of disabled proxy pattern tests
 
+// ============================================================================
+// Tests verifying SPI chipsets route through ChannelManager
+// These exercise the same code path that addLeds<APA102> uses on ESP32/Teensy4
+// when FASTLED_SPI_USES_CHANNEL_API=1.
+// ============================================================================
+
+/// Mock SPI driver that captures enqueued data for verification.
+/// Copies encoded bytes on enqueue so data survives poll() cleanup.
+class SpiCaptureMock : public IChannelDriver {
+public:
+    explicit SpiCaptureMock(const char* name) : mName(name) {}
+
+    int enqueueCount = 0;
+    int showCount = 0;
+    // Snapshots of encoded data captured at enqueue time (survives poll)
+    fl::vector<fl::vector<uint8_t>> capturedData;
+
+    bool canHandle(const ChannelDataPtr& data) const override {
+        return data && data->isSpi();
+    }
+
+    void enqueue(ChannelDataPtr channelData) override {
+        if (channelData) {
+            enqueueCount++;
+            // Snapshot the encoded bytes now, before poll() can clear them
+            const auto& src = channelData->getData();
+            fl::vector<uint8_t> copy;
+            copy.insert(copy.end(), src.begin(), src.end());
+            capturedData.push_back(fl::move(copy));
+        }
+    }
+
+    void show() override {
+        showCount++;
+    }
+
+    DriverState poll() override {
+        return DriverState::READY;
+    }
+
+    fl::string getName() const override { return mName; }
+
+    Capabilities getCapabilities() const override {
+        return Capabilities(false, true); // SPI only
+    }
+
+    void reset() {
+        enqueueCount = 0;
+        showCount = 0;
+        capturedData.clear();
+    }
+
+private:
+    fl::string mName;
+};
+
+FL_TEST_CASE("spiEncoderForChipset returns correct defaults") {
+    auto enc = SpiEncoder::spiEncoderForChipset(SpiChipset::APA102);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::APA102);
+    FL_CHECK_EQ(enc.clock_hz, 6000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::SK9822);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::SK9822);
+    FL_CHECK_EQ(enc.clock_hz, 12000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::HD107);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::HD107);
+    FL_CHECK_EQ(enc.clock_hz, 40000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::WS2801);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::WS2801);
+    FL_CHECK_EQ(enc.clock_hz, 1000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::HD108);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::HD108);
+    FL_CHECK_EQ(enc.clock_hz, 25000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::P9813);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::P9813);
+    FL_CHECK_EQ(enc.clock_hz, 10000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::LPD8806);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::LPD8806);
+    FL_CHECK_EQ(enc.clock_hz, 12000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::SM16716);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::SM16716);
+    FL_CHECK_EQ(enc.clock_hz, 16000000u);
+}
+
+FL_TEST_CASE("spiEncoderForChipset speed override") {
+    auto enc = SpiEncoder::spiEncoderForChipset(SpiChipset::APA102, 20000000);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::APA102);
+    FL_CHECK_EQ(enc.clock_hz, 20000000u);
+
+    // Zero override means use default
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::APA102, 0);
+    FL_CHECK_EQ(enc.clock_hz, 6000000u);
+}
+
+FL_TEST_CASE("APA102 channel routes through ChannelManager") {
+    // This tests the same path that addLeds<APA102> uses on ESP32/Teensy4:
+    //   SpiEncoder → SpiChipsetConfig → ChannelConfig → FastLED.add → Channel
+    //   → ChannelManager → driver
+
+    auto mock = fl::make_shared<SpiCaptureMock>("APA102_ROUTE_TEST");
+    ChannelManager& manager = ChannelManager::instance();
+    manager.addDriver(1000, mock);
+    bool exclusive = manager.setExclusiveDriver("APA102_ROUTE_TEST");
+    FL_REQUIRE(exclusive);
+
+    const int NUM_LEDS = 5;
+    CRGB leds[NUM_LEDS];
+    leds[0] = CRGB::Red;
+    leds[1] = CRGB::Green;
+    leds[2] = CRGB::Blue;
+    leds[3] = CRGB::White;
+    leds[4] = CRGB::Black;
+
+    // Mirror what addLeds<APA102, 5, 6>() does on channel-enabled platforms
+    SpiEncoder encoder = SpiEncoder::spiEncoderForChipset(SpiChipset::APA102);
+    SpiChipsetConfig spiCfg(5, 6, encoder);
+    ChannelConfig config(spiCfg, fl::span<CRGB>(leds, NUM_LEDS), RGB);
+    ChannelPtr channel = FastLED.add(config);
+
+    FL_REQUIRE(channel != nullptr);
+    FL_CHECK(channel->isSpi());
+    FL_CHECK_EQ(channel->getPin(), 5);
+    FL_CHECK_EQ(channel->getClockPin(), 6);
+    FL_CHECK_EQ(channel->size(), NUM_LEDS);
+
+    // Trigger show — should enqueue to mock driver
+    FastLED.show();
+
+    FL_CHECK_GT(mock->enqueueCount, 0);
+    FL_CHECK_GT(mock->showCount, 0);
+
+    // Verify encoded data is APA102 format
+    FL_REQUIRE_FALSE(mock->capturedData.empty());
+    const auto& data = mock->capturedData[0];
+
+    // APA102: 4-byte start frame + 4 bytes per LED + end frame
+    size_t minSize = 4 + (4 * NUM_LEDS);
+    FL_CHECK_GE(data.size(), minSize);
+
+    // Start frame: 4 zero bytes
+    FL_CHECK_EQ(data[0], 0x00);
+    FL_CHECK_EQ(data[1], 0x00);
+    FL_CHECK_EQ(data[2], 0x00);
+    FL_CHECK_EQ(data[3], 0x00);
+
+    // Each LED has 0xE0 | brightness header
+    for (int i = 0; i < NUM_LEDS; i++) {
+        size_t offset = 4 + (i * 4);
+        FL_CHECK_EQ(data[offset] & 0xE0, 0xE0);
+    }
+
+    // Cleanup
+    FastLED.remove(channel);
+    mock->poll();
+    manager.removeDriver(mock);
+}
+
+FL_TEST_CASE("SK9822 channel routes through ChannelManager") {
+    auto mock = fl::make_shared<SpiCaptureMock>("SK9822_ROUTE_TEST");
+    ChannelManager& manager = ChannelManager::instance();
+    manager.addDriver(1000, mock);
+    bool exclusive = manager.setExclusiveDriver("SK9822_ROUTE_TEST");
+    FL_REQUIRE(exclusive);
+
+    const int NUM_LEDS = 3;
+    CRGB leds[NUM_LEDS] = {CRGB::Red, CRGB::Green, CRGB::Blue};
+
+    SpiEncoder encoder = SpiEncoder::spiEncoderForChipset(SpiChipset::SK9822);
+    SpiChipsetConfig spiCfg(10, 11, encoder);
+    ChannelConfig config(spiCfg, fl::span<CRGB>(leds, NUM_LEDS), RGB);
+    ChannelPtr channel = FastLED.add(config);
+    FL_REQUIRE(channel != nullptr);
+
+    FastLED.show();
+
+    FL_CHECK_GT(mock->enqueueCount, 0);
+    FL_REQUIRE_FALSE(mock->capturedData.empty());
+
+    const auto& data = mock->capturedData[0];
+    // SK9822 also has 4-byte start frame + 4 bytes per LED
+    size_t minSize = 4 + (4 * NUM_LEDS);
+    FL_CHECK_GE(data.size(), minSize);
+
+    // Start frame
+    FL_CHECK_EQ(data[0], 0x00);
+    FL_CHECK_EQ(data[1], 0x00);
+    FL_CHECK_EQ(data[2], 0x00);
+    FL_CHECK_EQ(data[3], 0x00);
+
+    // Cleanup
+    FastLED.remove(channel);
+    mock->poll();
+    manager.removeDriver(mock);
+}
+
+FL_TEST_CASE("WS2801 channel routes through ChannelManager") {
+    auto mock = fl::make_shared<SpiCaptureMock>("WS2801_ROUTE_TEST");
+    ChannelManager& manager = ChannelManager::instance();
+    manager.addDriver(1000, mock);
+    bool exclusive = manager.setExclusiveDriver("WS2801_ROUTE_TEST");
+    FL_REQUIRE(exclusive);
+
+    const int NUM_LEDS = 4;
+    CRGB leds[NUM_LEDS] = {CRGB::Red, CRGB::Green, CRGB::Blue, CRGB::White};
+
+    SpiEncoder encoder = SpiEncoder::spiEncoderForChipset(SpiChipset::WS2801);
+    SpiChipsetConfig spiCfg(7, 8, encoder);
+    ChannelConfig config(spiCfg, fl::span<CRGB>(leds, NUM_LEDS), RGB);
+    ChannelPtr channel = FastLED.add(config);
+    FL_REQUIRE(channel != nullptr);
+
+    FastLED.show();
+
+    FL_CHECK_GT(mock->enqueueCount, 0);
+    FL_REQUIRE_FALSE(mock->capturedData.empty());
+
+    const auto& data = mock->capturedData[0];
+    // WS2801: 3 bytes per LED, no start/end frame
+    FL_CHECK_EQ(data.size(), 3u * NUM_LEDS);
+
+    // Cleanup
+    FastLED.remove(channel);
+    mock->poll();
+    manager.removeDriver(mock);
+}
+
+FL_TEST_CASE("Multiple SPI channels share ChannelManager") {
+    auto mock = fl::make_shared<SpiCaptureMock>("MULTI_SPI_TEST");
+    ChannelManager& manager = ChannelManager::instance();
+    manager.addDriver(1000, mock);
+    bool exclusive = manager.setExclusiveDriver("MULTI_SPI_TEST");
+    FL_REQUIRE(exclusive);
+
+    const int NUM_LEDS = 3;
+    CRGB leds1[NUM_LEDS] = {CRGB::Red, CRGB::Red, CRGB::Red};
+    CRGB leds2[NUM_LEDS] = {CRGB::Blue, CRGB::Blue, CRGB::Blue};
+
+    // Two APA102 strips on different pins
+    SpiEncoder enc = SpiEncoder::spiEncoderForChipset(SpiChipset::APA102);
+
+    SpiChipsetConfig cfg1(5, 6, enc);
+    ChannelConfig config1(cfg1, fl::span<CRGB>(leds1, NUM_LEDS), RGB);
+    ChannelPtr ch1 = FastLED.add(config1);
+
+    SpiChipsetConfig cfg2(7, 8, enc);
+    ChannelConfig config2(cfg2, fl::span<CRGB>(leds2, NUM_LEDS), RGB);
+    ChannelPtr ch2 = FastLED.add(config2);
+
+    FL_REQUIRE(ch1 != nullptr);
+    FL_REQUIRE(ch2 != nullptr);
+
+    FastLED.show();
+
+    // Both channels should be enqueued
+    FL_CHECK_EQ(mock->enqueueCount, 2);
+    FL_CHECK_EQ(mock->capturedData.size(), 2u);
+
+    // Cleanup
+    FastLED.remove(ch1);
+    FastLED.remove(ch2);
+    mock->poll();
+    manager.removeDriver(mock);
+}
+
+FL_TEST_CASE("SPI channel rejected by clockless-only driver") {
+    // A driver that only handles clockless should reject SPI channels
+    class ClocklessOnlyMock : public IChannelDriver {
+    public:
+        int enqueueCount = 0;
+        bool canHandle(const ChannelDataPtr& data) const override {
+            return data && data->isClockless();
+        }
+        void enqueue(ChannelDataPtr) override { enqueueCount++; }
+        void show() override {}
+        DriverState poll() override { return DriverState::READY; }
+        fl::string getName() const override { return "CLOCKLESS_ONLY"; }
+        Capabilities getCapabilities() const override {
+            return Capabilities(true, false);
+        }
+    };
+
+    auto clocklessMock = fl::make_shared<ClocklessOnlyMock>();
+    auto spiMock = fl::make_shared<SpiCaptureMock>("SPI_FALLBACK_TEST");
+
+    ChannelManager& manager = ChannelManager::instance();
+    // Register clockless at higher priority, SPI at lower
+    manager.addDriver(2000, clocklessMock);
+    manager.addDriver(1000, spiMock);
+    manager.setExclusiveDriver("CLOCKLESS_ONLY"); // disable all
+    manager.setDriverEnabled("CLOCKLESS_ONLY", true);
+    manager.setDriverEnabled("SPI_FALLBACK_TEST", true);
+
+    const int NUM_LEDS = 2;
+    CRGB leds[NUM_LEDS] = {CRGB::Red, CRGB::Green};
+
+    SpiEncoder enc = SpiEncoder::spiEncoderForChipset(SpiChipset::APA102);
+    SpiChipsetConfig spiCfg(5, 6, enc);
+    ChannelConfig config(spiCfg, fl::span<CRGB>(leds, NUM_LEDS), RGB);
+    ChannelPtr channel = FastLED.add(config);
+    FL_REQUIRE(channel != nullptr);
+
+    FastLED.show();
+
+    // Clockless-only driver should NOT have received SPI data
+    FL_CHECK_EQ(clocklessMock->enqueueCount, 0);
+    // SPI driver should have received it
+    FL_CHECK_GT(spiMock->enqueueCount, 0);
+
+    // Cleanup
+    FastLED.remove(channel);
+    spiMock->poll();
+    manager.removeDriver(clocklessMock);
+    manager.removeDriver(spiMock);
+}
+
+FL_TEST_CASE("spiEncoderForChipset covers all chipsets") {
+    // Test the chipsets NOT covered by "spiEncoderForChipset returns correct defaults"
+    auto enc = SpiEncoder::spiEncoderForChipset(SpiChipset::APA102HD);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::APA102HD);
+    FL_CHECK_EQ(enc.clock_hz, 6000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::SK9822HD);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::SK9822HD);
+    FL_CHECK_EQ(enc.clock_hz, 12000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::DOTSTAR);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::DOTSTAR);
+    FL_CHECK_EQ(enc.clock_hz, 6000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::DOTSTARHD);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::DOTSTARHD);
+    FL_CHECK_EQ(enc.clock_hz, 6000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::HD107HD);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::HD107HD);
+    FL_CHECK_EQ(enc.clock_hz, 40000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::WS2803);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::WS2803);
+    FL_CHECK_EQ(enc.clock_hz, 25000000u);
+
+    enc = SpiEncoder::spiEncoderForChipset(SpiChipset::LPD6803);
+    FL_CHECK_EQ(enc.chipset, SpiChipset::LPD6803);
+    FL_CHECK_EQ(enc.clock_hz, 12000000u);
+}
+
+FL_TEST_CASE("SPI factory methods produce correct chipset and speed") {
+    // Test all factory methods added in this change
+    auto e = SpiEncoder::sk9822HD();
+    FL_CHECK_EQ(e.chipset, SpiChipset::SK9822HD);
+    FL_CHECK_EQ(e.clock_hz, 12000000u);
+
+    e = SpiEncoder::dotstar();
+    FL_CHECK_EQ(e.chipset, SpiChipset::DOTSTAR);
+    FL_CHECK_EQ(e.clock_hz, 6000000u);
+
+    e = SpiEncoder::dotstarHD();
+    FL_CHECK_EQ(e.chipset, SpiChipset::DOTSTARHD);
+    FL_CHECK_EQ(e.clock_hz, 6000000u);
+
+    e = SpiEncoder::hd107();
+    FL_CHECK_EQ(e.chipset, SpiChipset::HD107);
+    FL_CHECK_EQ(e.clock_hz, 40000000u);
+
+    e = SpiEncoder::hd107HD();
+    FL_CHECK_EQ(e.chipset, SpiChipset::HD107HD);
+    FL_CHECK_EQ(e.clock_hz, 40000000u);
+
+    e = SpiEncoder::hd108();
+    FL_CHECK_EQ(e.chipset, SpiChipset::HD108);
+    FL_CHECK_EQ(e.clock_hz, 25000000u);
+
+    e = SpiEncoder::ws2801();
+    FL_CHECK_EQ(e.chipset, SpiChipset::WS2801);
+    FL_CHECK_EQ(e.clock_hz, 1000000u);
+
+    e = SpiEncoder::ws2803();
+    FL_CHECK_EQ(e.chipset, SpiChipset::WS2803);
+    FL_CHECK_EQ(e.clock_hz, 25000000u);
+
+    e = SpiEncoder::p9813();
+    FL_CHECK_EQ(e.chipset, SpiChipset::P9813);
+    FL_CHECK_EQ(e.clock_hz, 10000000u);
+
+    e = SpiEncoder::lpd8806();
+    FL_CHECK_EQ(e.chipset, SpiChipset::LPD8806);
+    FL_CHECK_EQ(e.clock_hz, 12000000u);
+
+    e = SpiEncoder::lpd6803();
+    FL_CHECK_EQ(e.chipset, SpiChipset::LPD6803);
+    FL_CHECK_EQ(e.clock_hz, 12000000u);
+
+    e = SpiEncoder::sm16716();
+    FL_CHECK_EQ(e.chipset, SpiChipset::SM16716);
+    FL_CHECK_EQ(e.clock_hz, 16000000u);
+}
+
+FL_TEST_CASE("SPI factory methods accept custom clock speed") {
+    auto e = SpiEncoder::sk9822HD(5000000);
+    FL_CHECK_EQ(e.clock_hz, 5000000u);
+
+    e = SpiEncoder::hd107(20000000);
+    FL_CHECK_EQ(e.clock_hz, 20000000u);
+
+    e = SpiEncoder::ws2801(500000);
+    FL_CHECK_EQ(e.clock_hz, 500000u);
+
+    e = SpiEncoder::p9813(2000000);
+    FL_CHECK_EQ(e.clock_hz, 2000000u);
+
+    e = SpiEncoder::lpd6803(8000000);
+    FL_CHECK_EQ(e.clock_hz, 8000000u);
+}
+
+FL_TEST_CASE("DOTSTAR aliases match APA102 defaults") {
+    auto dot = SpiEncoder::dotstar();
+    auto apa = SpiEncoder::apa102();
+    FL_CHECK_EQ(dot.clock_hz, apa.clock_hz);
+
+    auto dotHD = SpiEncoder::dotstarHD();
+    auto apaHD = SpiEncoder::apa102HD();
+    FL_CHECK_EQ(dotHD.clock_hz, apaHD.clock_hz);
+
+    // But chipset enum values differ (they are separate enum entries)
+    FL_CHECK_NE(dot.chipset, apa.chipset);
+    FL_CHECK_NE(dotHD.chipset, apaHD.chipset);
+}
+
+FL_TEST_CASE("P9813 channel routes with flag byte encoding") {
+    auto mock = fl::make_shared<SpiCaptureMock>("P9813_ROUTE_TEST");
+    ChannelManager& manager = ChannelManager::instance();
+    manager.addDriver(1000, mock);
+    bool exclusive = manager.setExclusiveDriver("P9813_ROUTE_TEST");
+    FL_REQUIRE(exclusive);
+
+    const int NUM_LEDS = 2;
+    CRGB leds[NUM_LEDS] = {CRGB::Red, CRGB::Blue};
+
+    SpiEncoder encoder = SpiEncoder::spiEncoderForChipset(SpiChipset::P9813);
+    SpiChipsetConfig spiCfg(5, 6, encoder);
+    ChannelConfig config(spiCfg, fl::span<CRGB>(leds, NUM_LEDS), RGB);
+    ChannelPtr channel = FastLED.add(config);
+    FL_REQUIRE(channel != nullptr);
+
+    FastLED.show();
+
+    FL_CHECK_GT(mock->enqueueCount, 0);
+    FL_REQUIRE_FALSE(mock->capturedData.empty());
+
+    const auto& data = mock->capturedData[0];
+    // P9813: 4-byte start boundary + 4 bytes per LED + 4-byte end boundary
+    size_t expectedSize = 4 + (4 * NUM_LEDS) + 4;
+    FL_CHECK_EQ(data.size(), expectedSize);
+
+    // Start boundary: 4 zero bytes
+    FL_CHECK_EQ(data[0], 0x00);
+    FL_CHECK_EQ(data[1], 0x00);
+    FL_CHECK_EQ(data[2], 0x00);
+    FL_CHECK_EQ(data[3], 0x00);
+
+    // Each LED has flag byte with 0xC0 prefix
+    for (int i = 0; i < NUM_LEDS; i++) {
+        size_t offset = 4 + (i * 4);
+        FL_CHECK_EQ(data[offset] & 0xC0, 0xC0);
+    }
+
+    // End boundary: 4 zero bytes
+    size_t endOffset = 4 + (4 * NUM_LEDS);
+    FL_CHECK_EQ(data[endOffset + 0], 0x00);
+    FL_CHECK_EQ(data[endOffset + 1], 0x00);
+    FL_CHECK_EQ(data[endOffset + 2], 0x00);
+    FL_CHECK_EQ(data[endOffset + 3], 0x00);
+
+    // Cleanup
+    FastLED.remove(channel);
+    mock->poll();
+    manager.removeDriver(mock);
+}
+
+FL_TEST_CASE("LPD8806 channel routes with MSB-set encoding") {
+    auto mock = fl::make_shared<SpiCaptureMock>("LPD8806_ROUTE_TEST");
+    ChannelManager& manager = ChannelManager::instance();
+    manager.addDriver(1000, mock);
+    bool exclusive = manager.setExclusiveDriver("LPD8806_ROUTE_TEST");
+    FL_REQUIRE(exclusive);
+
+    const int NUM_LEDS = 3;
+    CRGB leds[NUM_LEDS] = {CRGB(255, 0, 0), CRGB(0, 255, 0), CRGB(0, 0, 255)};
+
+    SpiEncoder encoder = SpiEncoder::spiEncoderForChipset(SpiChipset::LPD8806);
+    SpiChipsetConfig spiCfg(5, 6, encoder);
+    ChannelConfig config(spiCfg, fl::span<CRGB>(leds, NUM_LEDS), RGB);
+    ChannelPtr channel = FastLED.add(config);
+    FL_REQUIRE(channel != nullptr);
+
+    FastLED.show();
+
+    FL_CHECK_GT(mock->enqueueCount, 0);
+    FL_REQUIRE_FALSE(mock->capturedData.empty());
+
+    const auto& data = mock->capturedData[0];
+
+    // LPD8806: 3 bytes per LED + latch bytes
+    size_t ledBytes = 3 * NUM_LEDS;
+    size_t latchBytes = (NUM_LEDS * 3 + 63) / 64;
+    FL_CHECK_EQ(data.size(), ledBytes + latchBytes);
+
+    // Every color byte must have MSB set (0x80)
+    for (size_t i = 0; i < ledBytes; i++) {
+        FL_CHECK_EQ(data[i] & 0x80, 0x80);
+    }
+
+    // Latch bytes must be 0x00
+    for (size_t i = ledBytes; i < data.size(); i++) {
+        FL_CHECK_EQ(data[i], 0x00);
+    }
+
+    // Cleanup
+    FastLED.remove(channel);
+    mock->poll();
+    manager.removeDriver(mock);
+}
+
+FL_TEST_CASE("LPD6803 channel routes with 16-bit 5-5-5 encoding") {
+    auto mock = fl::make_shared<SpiCaptureMock>("LPD6803_ROUTE_TEST");
+    ChannelManager& manager = ChannelManager::instance();
+    manager.addDriver(1000, mock);
+    bool exclusive = manager.setExclusiveDriver("LPD6803_ROUTE_TEST");
+    FL_REQUIRE(exclusive);
+
+    const int NUM_LEDS = 2;
+    CRGB leds[NUM_LEDS] = {CRGB(255, 0, 0), CRGB(0, 0, 255)};
+
+    SpiEncoder encoder = SpiEncoder::spiEncoderForChipset(SpiChipset::LPD6803);
+    SpiChipsetConfig spiCfg(5, 6, encoder);
+    ChannelConfig config(spiCfg, fl::span<CRGB>(leds, NUM_LEDS), RGB);
+    ChannelPtr channel = FastLED.add(config);
+    FL_REQUIRE(channel != nullptr);
+
+    FastLED.show();
+
+    FL_CHECK_GT(mock->enqueueCount, 0);
+    FL_REQUIRE_FALSE(mock->capturedData.empty());
+
+    const auto& data = mock->capturedData[0];
+
+    // LPD6803: 4-byte start + 2 bytes per LED + optional end frame
+    // Start frame is 4 zero bytes
+    FL_CHECK_GE(data.size(), 4u + 2u * NUM_LEDS);
+    FL_CHECK_EQ(data[0], 0x00);
+    FL_CHECK_EQ(data[1], 0x00);
+    FL_CHECK_EQ(data[2], 0x00);
+    FL_CHECK_EQ(data[3], 0x00);
+
+    // Each LED is 16 bits (2 bytes), MSB of first byte has marker bit set
+    for (int i = 0; i < NUM_LEDS; i++) {
+        size_t offset = 4 + (i * 2);
+        FL_CHECK_EQ(data[offset] & 0x80, 0x80);
+    }
+
+    // Cleanup
+    FastLED.remove(channel);
+    mock->poll();
+    manager.removeDriver(mock);
+}
+
+FL_TEST_CASE("SM16716 channel routes with RGB encoding") {
+    auto mock = fl::make_shared<SpiCaptureMock>("SM16716_ROUTE_TEST");
+    ChannelManager& manager = ChannelManager::instance();
+    manager.addDriver(1000, mock);
+    bool exclusive = manager.setExclusiveDriver("SM16716_ROUTE_TEST");
+    FL_REQUIRE(exclusive);
+
+    const int NUM_LEDS = 2;
+    CRGB leds[NUM_LEDS] = {CRGB::Red, CRGB::Green};
+
+    SpiEncoder encoder = SpiEncoder::spiEncoderForChipset(SpiChipset::SM16716);
+    SpiChipsetConfig spiCfg(5, 6, encoder);
+    ChannelConfig config(spiCfg, fl::span<CRGB>(leds, NUM_LEDS), RGB);
+    ChannelPtr channel = FastLED.add(config);
+    FL_REQUIRE(channel != nullptr);
+
+    FastLED.show();
+
+    FL_CHECK_GT(mock->enqueueCount, 0);
+    FL_REQUIRE_FALSE(mock->capturedData.empty());
+
+    const auto& data = mock->capturedData[0];
+
+    // SM16716: 3 bytes per LED + 7-byte zero header (50 zero bits)
+    size_t expectedSize = (3 * NUM_LEDS) + 7;
+    FL_CHECK_EQ(data.size(), expectedSize);
+
+    // Trailing 7 bytes must be zero (50 zero-bit header)
+    size_t headerStart = 3 * NUM_LEDS;
+    for (size_t i = headerStart; i < data.size(); i++) {
+        FL_CHECK_EQ(data[i], 0x00);
+    }
+
+    // Cleanup
+    FastLED.remove(channel);
+    mock->poll();
+    manager.removeDriver(mock);
+}
+
+FL_TEST_CASE("DOTSTAR channel produces APA102-compatible encoding") {
+    auto mock = fl::make_shared<SpiCaptureMock>("DOTSTAR_ENCODE_TEST");
+    ChannelManager& manager = ChannelManager::instance();
+    manager.addDriver(1000, mock);
+    bool exclusive = manager.setExclusiveDriver("DOTSTAR_ENCODE_TEST");
+    FL_REQUIRE(exclusive);
+
+    const int NUM_LEDS = 3;
+    CRGB leds[NUM_LEDS] = {CRGB::Red, CRGB::Green, CRGB::Blue};
+
+    SpiEncoder encoder = SpiEncoder::spiEncoderForChipset(SpiChipset::DOTSTAR);
+    SpiChipsetConfig spiCfg(5, 6, encoder);
+    ChannelConfig config(spiCfg, fl::span<CRGB>(leds, NUM_LEDS), RGB);
+    ChannelPtr channel = FastLED.add(config);
+    FL_REQUIRE(channel != nullptr);
+
+    FastLED.show();
+
+    FL_CHECK_GT(mock->enqueueCount, 0);
+    FL_REQUIRE_FALSE(mock->capturedData.empty());
+
+    const auto& data = mock->capturedData[0];
+
+    // DOTSTAR uses APA102 protocol: 4-byte start + 4 bytes/LED + end
+    size_t minSize = 4 + (4 * NUM_LEDS);
+    FL_CHECK_GE(data.size(), minSize);
+
+    // Start frame: 4 zero bytes (same as APA102)
+    FL_CHECK_EQ(data[0], 0x00);
+    FL_CHECK_EQ(data[1], 0x00);
+    FL_CHECK_EQ(data[2], 0x00);
+    FL_CHECK_EQ(data[3], 0x00);
+
+    // Each LED has 0xE0 brightness header (same as APA102)
+    for (int i = 0; i < NUM_LEDS; i++) {
+        size_t offset = 4 + (i * 4);
+        FL_CHECK_EQ(data[offset] & 0xE0, 0xE0);
+    }
+
+    // Cleanup
+    FastLED.remove(channel);
+    mock->poll();
+    manager.removeDriver(mock);
+}
+
 } // FL_TEST_FILE
