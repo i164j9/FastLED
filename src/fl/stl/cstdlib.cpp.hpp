@@ -30,6 +30,11 @@ void *aligned_alloc(fl::size_t alignment, fl::size_t size) {
     return ::malloc(size);
 #elif defined(FL_IS_WIN)
     return ::_aligned_malloc(size, alignment);
+#elif defined(FL_IS_ESP32) && !ESP_IDF_VERSION_4_OR_HIGHER
+    // ESP-IDF 3.x toolchain (GCC 5.2 / newlib) does not provide
+    // ::aligned_alloc. Fall back to plain malloc.
+    (void)alignment;
+    return ::malloc(size);
 #else
     fl::size_t aligned_size = (size + alignment - 1) & ~(alignment - 1);
     return ::aligned_alloc(alignment, aligned_size);

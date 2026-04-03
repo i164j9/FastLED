@@ -14,7 +14,9 @@
 #include "fl/system/log.h"
 
 // ESP32 HTTP server header (must be before namespace declarations)
-#if defined(FL_IS_ESP32) && !defined(FASTLED_HAS_NETWORKING)
+// Requires IDF 4.0+ for HTTPD_500_INTERNAL_SERVER_ERROR, httpd_resp_send_err, etc.
+#include "platforms/esp/esp_version.h"  // ok platform headers  // IWYU pragma: keep
+#if defined(FL_IS_ESP32) && !defined(FASTLED_HAS_NETWORKING) && ESP_IDF_VERSION_4_OR_HIGHER
 // IWYU pragma: begin_keep
 #include <esp_http_server.h>
 // IWYU pragma: end_keep
@@ -620,10 +622,10 @@ void Server::cleanup_stale_connections() {
 } // namespace asio
 } // namespace fl
 
-#elif defined(FL_IS_ESP32)
+#elif defined(FL_IS_ESP32) && ESP_IDF_VERSION_4_OR_HIGHER
 
 // ============================================================================
-// ESP32 Implementation using esp_http_server.h
+// ESP32 Implementation using esp_http_server.h (IDF 4.0+)
 // ============================================================================
 
 namespace fl {
@@ -938,9 +940,9 @@ size_t Server::update() {
 } // namespace asio
 } // namespace fl
 
-#else // !FASTLED_HAS_NETWORKING && !FL_IS_ESP32
+#else // !FASTLED_HAS_NETWORKING && !(FL_IS_ESP32 && IDF4+)
 
-// Stub implementation for platforms without networking
+// Stub implementation for platforms without networking (includes ESP32 IDF 3.x)
 namespace fl {
 namespace asio {
 namespace http {

@@ -7,7 +7,8 @@
 /// contains ZERO business logic - all methods delegate directly to ESP-IDF.
 
 #include "platforms/is_platform.h"
-#ifdef FL_IS_ESP32
+#include "platforms/esp/esp_version.h"
+#if defined(FL_IS_ESP32) && ESP_IDF_VERSION_4_OR_HIGHER
 
 #include "platforms/esp/32/drivers/uart/uart_peripheral_esp.h"
 #include "fl/system/log.h"
@@ -321,4 +322,4 @@ const UartPeripheralConfig& UartPeripheralEsp::getConfig() const FL_NOEXCEPT {
 
 } // namespace fl
 
-#endif // FL_IS_ESP32
+#endif // FL_IS_ESP32 && ESP_IDF_VERSION_4_OR_HIGHER

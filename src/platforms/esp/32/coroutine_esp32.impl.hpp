@@ -9,6 +9,7 @@
 /// factory function, and exitCurrent.
 
 #include "platforms/esp/is_esp.h"
+#include "platforms/esp/esp_version.h"
 
 #ifdef FL_IS_ESP32
 
@@ -145,7 +146,8 @@ TaskCoroutinePtr TaskCoroutineESP32::create(
     impl->mName = fl::move(name);
     impl->mFunction = fl::move(function);
 
-    // Allocate stack + TCB in internal RAM — SPIRAM crashes on ESP32-P4
+#if ESP_IDF_VERSION_4_OR_HIGHER
+    // IDF 4.0+: Allocate stack + TCB in internal RAM — SPIRAM crashes on ESP32-P4
     impl->mStackBuf.reset(static_cast<StackType_t*>(
         heap_caps_malloc(stack_size * sizeof(StackType_t),
                          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
@@ -168,6 +170,22 @@ TaskCoroutinePtr TaskCoroutineESP32::create(
         impl->mStackBuf.get(),
         impl->mTaskTcb.get(),
         tskNO_AFFINITY);
+#else
+    // IDF 3.x: xTaskCreateStaticPinnedToCore may not be available
+    // (configSUPPORT_STATIC_ALLOCATION not guaranteed). Use dynamic
+    // allocation variant instead.
+    BaseType_t rc = xTaskCreatePinnedToCore(
+        task_entry,
+        impl->mName.c_str(),
+        stack_size,
+        impl,                       // param = this
+        tskIDLE_PRIORITY + priority,
+        &impl->mTask,
+        tskNO_AFFINITY);
+    if (rc != pdPASS) {
+        impl->mTask = nullptr;
+    }
+#endif
 
     if (!impl->mTask) {
         FL_WARN("TaskCoroutineESP32: Failed to create FreeRTOS task for '"
