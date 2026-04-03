@@ -120,7 +120,7 @@ async def main() -> None:
             f"[bold cyan]FastLED WASM Test Runner[/bold cyan]\n\n"
             f"[yellow]Will:[/yellow]\n"
             f"  [green]✓[/green] Launch headless browser demo for [bold]{args.example}[/bold]\n"
-            f"  [green]✓[/green] Run for 5 seconds\n"
+            f"  [green]✓[/green] Poll for up to 30 seconds\n"
             f"  [green]✓[/green] Verify FastLED initialization & rendering\n"
             f"  [green]✓[/green] Exit automatically",
             title="[bold magenta]Test Plan[/bold magenta]",
@@ -200,32 +200,41 @@ async def main() -> None:
                     wait_until="domcontentloaded",
                 )
 
-                # Wait for FastLED to initialize and render frames.
+                # Poll for FastLED to initialize and render frames.
                 # The Vite-bundled fastled_callbacks.ts increments
                 # globalThis.fastLEDFrameCount on each frame automatically.
-                await page.wait_for_timeout(5000)
+                # Poll every 500ms for up to 30s instead of a fixed wait,
+                # since WASM init time varies by platform and load.
+                max_wait_ms = 30000
+                poll_interval_ms = 500
+                elapsed_ms = 0
+                is_alive = False
 
-                # Check frame count OR controller/worker state.
-                # In worker mode, frames render in the worker thread so
-                # fastLEDFrameCount may stay 0 on the main thread.
-                result = await page.evaluate(
-                    """(() => {
-                        const frameCount = globalThis.fastLEDFrameCount || 0;
-                        const controllerRunning = !!(
-                            window.fastLEDController &&
-                            window.fastLEDController.running
-                        );
-                        const workerActive = !!(
-                            window.fastLEDWorkerManager &&
-                            window.fastLEDWorkerManager.isWorkerActive
-                        );
-                        return { frameCount, controllerRunning, workerActive };
-                    })()"""
-                )
-                call_count = result.get("frameCount", 0)
-                controller_running = result.get("controllerRunning", False)
-                worker_active = result.get("workerActive", False)
-                is_alive = call_count > 0 or controller_running or worker_active
+                while elapsed_ms < max_wait_ms:
+                    await page.wait_for_timeout(poll_interval_ms)
+                    elapsed_ms += poll_interval_ms
+
+                    result = await page.evaluate(
+                        """(() => {
+                            const frameCount = globalThis.fastLEDFrameCount || 0;
+                            const controllerRunning = !!(
+                                window.fastLEDController &&
+                                window.fastLEDController.running
+                            );
+                            const workerActive = !!(
+                                window.fastLEDWorkerManager &&
+                                window.fastLEDWorkerManager.isWorkerActive
+                            );
+                            return { frameCount, controllerRunning, workerActive };
+                        })()"""
+                    )
+                    call_count = result.get("frameCount", 0)
+                    controller_running = result.get("controllerRunning", False)
+                    worker_active = result.get("workerActive", False)
+                    is_alive = call_count > 0 or controller_running or worker_active
+
+                    if is_alive:
+                        break
 
                 # Always print browser errors/warnings
                 if browser_errors:
@@ -267,7 +276,7 @@ async def main() -> None:
                 else:
                     console.print()
                     console.print(
-                        "[bold red]✗ Error:[/bold red] FastLED.js failed to initialize within 5 seconds",
+                        f"[bold red]✗ Error:[/bold red] FastLED.js failed to initialize within {max_wait_ms // 1000} seconds",
                     )
                     raise Exception("FastLED.js failed to initialize")
 
