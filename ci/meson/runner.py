@@ -837,6 +837,7 @@ def run_meson_build_and_test(
                             compile_timeout=compile_timeout,
                             build_optimizer=build_optimizer,
                             test_file_filter=test_file_filter,
+                            build_timer=build_timer,
                         )
 
                 # Save binary fingerprints of libfastled.a and all DLLs after a

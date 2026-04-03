@@ -527,7 +527,11 @@ def stream_compile_and_run_tests(
             return
         if filter_needle and filter_needle not in test_path.name.lower():
             return
-        future = executor.submit(_run_one_test, test_path)
+        try:
+            future = executor.submit(_run_one_test, test_path)
+        except RuntimeError:
+            # Executor was shut down (e.g. compilation failed concurrently)
+            return
         with futures_lock:
             futures.append(future)
 
