@@ -117,6 +117,8 @@ void setup() {
     Serial.begin(115200);
     delay(1000);  // Allow time for serial monitor connection
 
+    Serial.println("SpecialDrivers/ESP/DriverTest setup starting");
+
     // Initialize FastLED with WS2812 strip
     // The driver can be switched at runtime using setExclusiveDriver()
     FastLED.addLeds<WS2812, DATA_PIN, GRB>(leds, NUM_LEDS);

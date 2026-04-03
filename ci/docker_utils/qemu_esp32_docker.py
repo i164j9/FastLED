@@ -66,16 +66,19 @@ if [ "{qemu_machine}" = "esp32c3" ]; then
         -nographic \\
         -machine {qemu_machine} \\
         -drive file="/tmp/flash.bin",if=mtd,format=raw \\
+        -global driver=timer.{qemu_machine}.timg,property=wdt_disable,value=true \\
         -monitor none \\
         -serial mon:stdio
 else
-    # ESP32 uses Xtensa architecture
+    # ESP32/ESP32-S2/ESP32-S3 use Xtensa architecture
+    # Note: The watchdog timer driver name must match the machine type
+    # (timer.esp32.timg for esp32, timer.esp32s3.timg for esp32s3, etc.)
     echo "Running {qemu_system} for {qemu_machine}"
     {qemu_system} \\
         -nographic \\
         -machine {qemu_machine} \\
         -drive file="/tmp/flash.bin",if=mtd,format=raw \\
-        -global driver=timer.esp32.timg,property=wdt_disable,value=true \\
+        -global driver=timer.{qemu_machine}.timg,property=wdt_disable,value=true \\
         -monitor none \\
         -serial mon:stdio
 fi
@@ -515,21 +518,16 @@ class DockerQEMURunner:
 
     def build_qemu_command(
         self,
-        firmware_name: str = "firmware.bin",
-        flash_size: int = 4,
         machine: str = "esp32",
     ) -> list[str]:
         """Build QEMU command to run inside Docker container.
 
         Args:
-            firmware_name: Name of firmware file in mounted directory
-            flash_size: Flash size in MB
             machine: QEMU machine type (esp32, esp32c3, esp32s3, etc.)
 
         Returns:
             List of command arguments for QEMU
         """
-        # For Linux containers, use a workaround to run QEMU through Docker Desktop's Windows integration
         firmware_path = f"{self.firmware_mount_path}/flash.bin"
 
         # Determine QEMU system and machine based on target
@@ -563,7 +561,6 @@ class DockerQEMURunner:
         self,
         firmware_path: Path,
         timeout: int = 30,
-        flash_size: int = 4,
         interrupt_regex: Optional[str] = None,
         interactive: bool = False,
         output_file: Optional[str] = None,
@@ -575,7 +572,6 @@ class DockerQEMURunner:
         Args:
             firmware_path: Path to firmware.bin or build directory
             timeout: Timeout in seconds (timeout is treated as success)
-            flash_size: Flash size in MB
             interrupt_regex: Regex pattern to detect in output (informational only)
             interactive: Run in interactive mode (attach to container)
             output_file: Optional file path to write QEMU output to
@@ -650,9 +646,7 @@ class DockerQEMURunner:
             }
 
             # Build QEMU command
-            qemu_cmd = self.build_qemu_command(
-                firmware_name="firmware.bin", flash_size=flash_size, machine=machine
-            )
+            qemu_cmd = self.build_qemu_command(machine=machine)
 
             print(f"Running QEMU in Docker container: {self.container_name}")
             print(f"QEMU command: {' '.join(qemu_cmd)}")
@@ -748,7 +742,6 @@ def main():
     return runner.run(
         firmware_path=args.firmware_path,
         timeout=args.timeout,
-        flash_size=args.flash_size,
         interrupt_regex=args.interrupt_regex,
         interactive=args.interactive,
         output_file=args.output_file,

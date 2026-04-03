@@ -219,7 +219,6 @@ def run_qemu_tests(args: TestArgs) -> None:
             qemu_returncode = docker_runner.run(
                 firmware_path=merged_bin_path,
                 timeout=30,
-                flash_size=4,
                 interrupt_regex=interrupt_regex,
                 interactive=False,
                 output_file=output_file,

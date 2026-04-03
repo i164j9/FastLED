@@ -51,7 +51,6 @@ class QEMUTestIntegration:
         firmware_path: str | Path,
         timeout: int = 30,
         interrupt_regex: Optional[str] = None,
-        flash_size: int = 4,
         machine: str = "esp32",
     ) -> int:
         """Run QEMU test using Docker.
@@ -60,7 +59,6 @@ class QEMUTestIntegration:
             firmware_path: Path to firmware or build directory
             timeout: Test timeout in seconds
             interrupt_regex: Pattern to interrupt on success
-            flash_size: Flash size in MB
             machine: QEMU machine type (esp32, esp32c3, esp32s3)
 
         Returns:
@@ -73,7 +71,7 @@ class QEMUTestIntegration:
 
         if runner_type == "docker":
             return self._run_docker_qemu(
-                firmware_path, timeout, interrupt_regex, flash_size, machine
+                firmware_path, timeout, interrupt_regex, machine
             )
         else:
             print("ERROR: Docker is not available!", file=sys.stderr)
@@ -85,7 +83,6 @@ class QEMUTestIntegration:
         firmware_path: Path,
         timeout: int,
         interrupt_regex: Optional[str],
-        flash_size: int,
         machine: str,
     ) -> int:
         """Run QEMU test using Docker."""
@@ -96,7 +93,6 @@ class QEMUTestIntegration:
             firmware_path=firmware_path,
             timeout=timeout,
             interrupt_regex=interrupt_regex,
-            flash_size=flash_size,
             machine=machine,
         )
 
