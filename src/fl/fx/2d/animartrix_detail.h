@@ -3,12 +3,13 @@
 // allow-include-after-namespace
 
 // Animartrix detail: Modular implementation of Animartrix effects.
-// Original by Stefan Petrick 2023. Adapted to C++ by Netmindz 2023.
+// Original concept by Stefan Petrick 2023. Adapted to C++ by Netmindz 2023.
 // Adapted to FastLED by Zach Vorhies 2024.
 // Refactored to free-function architecture 2026.
+// Fixed-point optimization migration 2026.
 //
-// Licensed under Creative Commons Attribution License CC BY-NC 3.0
-// https://creativecommons.org/licenses/by-nc/3.0/
+// Licensed under the MIT License.
+// See LICENSE file in the root of this repository.
 //
 // Architecture: Context struct holds all shared state. Each animation is an
 // IAnimartrix2Viz subclass with a draw(Context&) method. Internally delegates
