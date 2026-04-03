@@ -15,7 +15,7 @@
 #include "ValidationBle.h"
 #include "ValidationNet.h"
 #include "ValidationOta.h"
-#include "fl/remote/transport/serial.h"
+#include "fl/control/transport/serial.h"
 #include "fl/system/heap.h"
 #include "Common.h"
 #include "ValidationTest.h"

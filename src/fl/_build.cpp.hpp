@@ -21,6 +21,7 @@
 #include "fl/channels/_build.cpp.hpp"
 #include "fl/chipsets/_build.cpp.hpp"
 #include "fl/codec/_build.cpp.hpp"
+#include "fl/control/_build.cpp.hpp"
 #include "fl/detail/_build.cpp.hpp"
 #include "fl/details/_build.cpp.hpp"
 #include "fl/font/_build.cpp.hpp"
@@ -28,7 +29,6 @@
 #include "fl/gfx/_build.cpp.hpp"
 #include "fl/math/_build.cpp.hpp"
 #include "fl/net/_build.cpp.hpp"
-#include "fl/remote/_build.cpp.hpp"
 #include "fl/sensors/_build.cpp.hpp"
 
 #include "fl/stl/_build.cpp.hpp"

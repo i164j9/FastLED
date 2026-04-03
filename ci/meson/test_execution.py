@@ -203,7 +203,7 @@ def run_meson_test(
                 from ci.meson.testlog_parser import extract_error_context_from_testlog
 
                 # Parse the meson output to find which tests failed
-                # Pattern matches: "fastled:fl_remote_remote FAIL"
+                # Pattern matches: "fastled:fl_control_remote FAIL"
                 test_fail_pattern = re.compile(r"(\S+:\S+)\s+FAIL")
                 for match in test_fail_pattern.finditer(proc.stdout):
                     failed_test_names.add(match.group(1))

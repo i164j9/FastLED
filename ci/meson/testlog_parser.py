@@ -106,7 +106,7 @@ def extract_error_context_from_testlog(
 
     Args:
         testlog_path: Path to meson testlog.txt
-        failed_test_names: Set of test names that failed (e.g., {"fastled:fl_remote_remote"})
+        failed_test_names: Set of test names that failed (e.g., {"fastled:fl_control_remote"})
         context_lines: Number of lines to show before/after error lines
     """
     entries = parse_testlog(testlog_path)
