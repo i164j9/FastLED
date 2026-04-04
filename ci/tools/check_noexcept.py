@@ -8,7 +8,7 @@ Windows only (uses system LLVM install).
 
 Usage:
     uv run python ci/tools/check_noexcept.py                         # check all scopes
-    uv run python ci/tools/check_noexcept.py --scope drivers         # ESP32 drivers only
+    uv run python ci/tools/check_noexcept.py --scope platforms       # all platforms
     uv run python ci/tools/check_noexcept.py --scope fl              # fl/ core only
 """
 
@@ -23,19 +23,19 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Translation units for different scopes
-_TU_DRIVERS = "ci/tools/_noexcept_check_tu.cpp"
+_TU_PLATFORMS = "ci/tools/_noexcept_check_platforms_tu.cpp"
 _TU_FL = "src/fl/build/fl.cpp"
 
 # Scope → (translation_unit, file_matching_regex)
 _SCOPES: dict[str, list[tuple[str, str]]] = {
-    "drivers": [
-        (_TU_DRIVERS, ".*platforms.esp.32.drivers.*"),
+    "platforms": [
+        (_TU_PLATFORMS, ".*src.platforms.*"),
     ],
     "fl": [
         (_TU_FL, ".*src.fl.*"),
     ],
     "all": [
-        (_TU_DRIVERS, ".*platforms.esp.32.drivers.*"),
+        (_TU_PLATFORMS, ".*src.platforms.*"),
         (_TU_FL, ".*src.fl.*"),
     ],
 }

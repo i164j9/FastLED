@@ -133,10 +133,10 @@ def run_clang_tidy(no_fingerprint: bool, run_tidy: bool) -> bool:
 
 def run_noexcept_check(run_tidy: bool) -> bool:
     """
-    Run FL_NOEXCEPT enforcement on ESP32 driver functions.
+    Run FL_NOEXCEPT enforcement on platform functions.
 
     Uses clang-query AST analysis to find functions missing FL_NOEXCEPT
-    in platforms/esp/32/drivers/. Requires clang-query to be installed.
+    in src/platforms/. Requires clang-query to be installed.
 
     Args:
         run_tidy: Only run when --tidy is enabled
@@ -145,14 +145,14 @@ def run_noexcept_check(run_tidy: bool) -> bool:
         True if check passed (or skipped), False if violations found
     """
     print("")
-    print("🔍 FL_NOEXCEPT ESP32 DRIVER CHECK")
-    print("-----------------------------------")
+    print("🔍 FL_NOEXCEPT PLATFORMS CHECK")
+    print("-------------------------------")
 
     if not run_tidy:
         print("⏭️  noexcept check skipped (use --tidy to enable)")
         return True
 
-    from ci.lint.clang_tidy.noexcept_esp32_drivers import (
+    from ci.lint.clang_tidy.noexcept_platforms import (
         _find_clang_query,
         _find_missing_noexcept,
     )
@@ -163,12 +163,12 @@ def run_noexcept_check(run_tidy: bool) -> bool:
         return True
 
     print(f"Using: {clang_query}")
-    print("Running clang-query AST analysis on ESP32 drivers...")
+    print("Running clang-query AST analysis on platforms...")
 
     hits = _find_missing_noexcept(clang_query)
 
     if not hits:
-        print("✅ All ESP32 driver functions have FL_NOEXCEPT")
+        print("✅ All platform functions have FL_NOEXCEPT")
         return True
 
     # Group by file for display
@@ -185,7 +185,7 @@ def run_noexcept_check(run_tidy: bool) -> bool:
             print(f"    Line {line_num}: {line_text}")
 
     print(
-        "\n💡 Auto-fix: uv run python ci/lint/clang_tidy/noexcept_esp32_drivers.py --fix"
+        "\n💡 Auto-fix: uv run python ci/refactor/add_fl_noexcept.py --scope platforms --apply"
     )
     return False
 

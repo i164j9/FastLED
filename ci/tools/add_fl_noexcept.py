@@ -7,7 +7,7 @@ missing noexcept, then inserts FL_NOEXCEPT at the correct position.
 Usage:
     uv run python ci/tools/add_fl_noexcept.py --scope fl/stl            # dry-run
     uv run python ci/tools/add_fl_noexcept.py --scope fl/stl --apply    # apply
-    uv run python ci/tools/add_fl_noexcept.py --scope platforms/esp/32  # dry-run
+    uv run python ci/tools/add_fl_noexcept.py --scope platforms         # dry-run (all platforms)
 """
 
 import argparse
@@ -55,8 +55,8 @@ def run_clang_query(scope: str) -> list[tuple[str, int]]:
     Returns list of (filepath, line_number) tuples.
     """
     # Pick translation unit based on scope
-    if "platforms/esp/32/drivers" in scope:
-        tu = "ci/tools/_noexcept_check_tu.cpp"
+    if "platforms" in scope:
+        tu = "ci/tools/_noexcept_check_platforms_tu.cpp"
     else:
         tu = "src/fl/build/fl.cpp"
 

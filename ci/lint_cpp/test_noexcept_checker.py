@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Unit tests for NoexceptEsp32Checker."""
+"""Unit tests for NoexceptFunctionChecker (unified noexcept checker)."""
 
 import unittest
 
-from ci.lint_cpp.noexcept_esp32_checker import NoexceptEsp32Checker
+from ci.lint_cpp.noexcept_checker import NoexceptFunctionChecker
 from ci.util.check_files import FileContent
 
 
-_DRIVER_PATH = "src/platforms/esp/32/drivers/rmt/some_driver.h"
-_DRIVER_CPP = "src/platforms/esp/32/drivers/spi/channel_driver_spi.cpp.hpp"
+_FL_HEADER = "src/fl/system/log.h"
+_PLATFORM_HEADER = "src/platforms/arm/d21/semaphore_samd.h"
+_DRIVER_HEADER = "src/platforms/esp/32/drivers/rmt/some_driver.h"
+_PLATFORM_SHARED = "src/platforms/shared/rx_device_native.h"
+_PLATFORM_STUB = "src/platforms/stub/mutex_stub_noop.h"
 
 
-def _make(code: str, path: str = _DRIVER_PATH) -> FileContent:
+def _make(code: str, path: str = _PLATFORM_HEADER) -> FileContent:
     return FileContent(path=path, content=code, lines=code.splitlines())
 
 
-def _violations(code: str, path: str = _DRIVER_PATH) -> list[tuple[int, str]]:
-    c = NoexceptEsp32Checker()
+def _violations(code: str, path: str = _PLATFORM_HEADER) -> list[tuple[int, str]]:
+    c = NoexceptFunctionChecker()
     fc = _make(code, path)
     if not c.should_process_file(path):
         return []
@@ -28,22 +31,66 @@ def _violations(code: str, path: str = _DRIVER_PATH) -> list[tuple[int, str]]:
 
 
 class TestFileFiltering(unittest.TestCase):
+    """Test that should_process_file correctly filters files."""
+
+    # Files that SHOULD be processed
+    def test_fl_header(self) -> None:
+        self.assertTrue(NoexceptFunctionChecker().should_process_file(_FL_HEADER))
+
+    def test_platform_header(self) -> None:
+        self.assertTrue(NoexceptFunctionChecker().should_process_file(_PLATFORM_HEADER))
+
     def test_driver_header(self) -> None:
-        self.assertTrue(NoexceptEsp32Checker().should_process_file(_DRIVER_PATH))
+        self.assertTrue(NoexceptFunctionChecker().should_process_file(_DRIVER_HEADER))
 
-    def test_driver_cpp_hpp(self) -> None:
-        self.assertTrue(NoexceptEsp32Checker().should_process_file(_DRIVER_CPP))
+    def test_platform_shared(self) -> None:
+        self.assertTrue(NoexceptFunctionChecker().should_process_file(_PLATFORM_SHARED))
 
-    def test_outside_drivers_skipped(self) -> None:
-        self.assertFalse(
-            NoexceptEsp32Checker().should_process_file("src/fl/system/log.h")
+    def test_platform_stub(self) -> None:
+        self.assertTrue(NoexceptFunctionChecker().should_process_file(_PLATFORM_STUB))
+
+    def test_hpp_file(self) -> None:
+        self.assertTrue(
+            NoexceptFunctionChecker().should_process_file(
+                "src/platforms/adafruit/clockless_real.hpp"
+            )
         )
 
-    def test_esp32_non_driver_skipped(self) -> None:
+    # Files that should be SKIPPED
+    def test_cpp_hpp_skipped(self) -> None:
         self.assertFalse(
-            NoexceptEsp32Checker().should_process_file(
-                "src/platforms/esp/32/mutex_esp32.h"
+            NoexceptFunctionChecker().should_process_file(
+                "src/platforms/esp/32/condition_variable_esp32.cpp.hpp"
             )
+        )
+
+    def test_cpp_file_skipped(self) -> None:
+        self.assertFalse(
+            NoexceptFunctionChecker().should_process_file(
+                "src/platforms/esp/32/foo.cpp"
+            )
+        )
+
+    def test_noexcept_h_skipped(self) -> None:
+        self.assertFalse(
+            NoexceptFunctionChecker().should_process_file("src/fl/stl/noexcept.h")
+        )
+
+    def test_third_party_skipped(self) -> None:
+        self.assertFalse(
+            NoexceptFunctionChecker().should_process_file(
+                "src/platforms/third_party/foo.h"
+            )
+        )
+
+    def test_outside_src_skipped(self) -> None:
+        self.assertFalse(
+            NoexceptFunctionChecker().should_process_file("tests/test_foo.h")
+        )
+
+    def test_examples_skipped(self) -> None:
+        self.assertFalse(
+            NoexceptFunctionChecker().should_process_file("examples/Blink/Blink.h")
         )
 
 
@@ -51,6 +98,8 @@ class TestFileFiltering(unittest.TestCase):
 
 
 class TestMissingNoexcept(unittest.TestCase):
+    """Test that functions missing FL_NOEXCEPT are flagged."""
+
     def test_void_func(self) -> None:
         self.assertEqual(len(_violations("void foo();")), 1)
 
@@ -70,16 +119,22 @@ class TestMissingNoexcept(unittest.TestCase):
         self.assertEqual(len(_violations("static void helper(int x);")), 1)
 
     def test_constructor(self) -> None:
-        self.assertEqual(len(_violations("ChannelEngineSpi();")), 1)
+        self.assertEqual(len(_violations("Semaphore();")), 1)
 
     def test_multiple(self) -> None:
         self.assertEqual(len(_violations("void a();\nint b();\nbool c() const;")), 3)
+
+    def test_fl_scope(self) -> None:
+        """Violations in src/fl/ are also detected."""
+        self.assertEqual(len(_violations("void foo();", path=_FL_HEADER)), 1)
 
 
 # ── Should pass (has noexcept / FL_NOEXCEPT) ────────────────────────────────
 
 
 class TestHasNoexcept(unittest.TestCase):
+    """Test that functions with noexcept/FL_NOEXCEPT are not flagged."""
+
     def test_noexcept(self) -> None:
         self.assertEqual(len(_violations("void foo() noexcept;")), 0)
 
@@ -109,8 +164,10 @@ class TestHasNoexcept(unittest.TestCase):
 
 
 class TestExemptions(unittest.TestCase):
+    """Test that non-function patterns are not flagged."""
+
     def test_destructor(self) -> None:
-        self.assertEqual(len(_violations("~ChannelEngineSpi();")), 0)
+        self.assertEqual(len(_violations("~Semaphore();")), 0)
 
     def test_destructor_qualified(self) -> None:
         self.assertEqual(len(_violations("Foo::~Foo() {")), 0)
@@ -130,8 +187,17 @@ class TestExemptions(unittest.TestCase):
     def test_multiline_comment(self) -> None:
         self.assertEqual(len(_violations("/* void foo();\n*/")), 0)
 
-    def test_suppression(self) -> None:
+    def test_suppression_ok_no_noexcept(self) -> None:
         self.assertEqual(len(_violations("void foo(); // ok no noexcept")), 0)
+
+    def test_suppression_ok_no_fl_noexcept(self) -> None:
+        self.assertEqual(len(_violations("void foo(); // ok no FL_NOEXCEPT")), 0)
+
+    def test_suppression_noexcept_not_required(self) -> None:
+        self.assertEqual(len(_violations("void foo(); // noexcept not required")), 0)
+
+    def test_suppression_nolint(self) -> None:
+        self.assertEqual(len(_violations("void foo(); // nolint")), 0)
 
     def test_macro_define(self) -> None:
         self.assertEqual(len(_violations("#define FOO(x) bar(x)")), 0)
@@ -178,26 +244,48 @@ class TestExemptions(unittest.TestCase):
     def test_static_cast(self) -> None:
         self.assertEqual(len(_violations("auto x = static_cast<int>(y);")), 0)
 
+    def test_asm_volatile(self) -> None:
+        self.assertEqual(len(_violations('asm volatile("nop");')), 0)
+
+    def test_asm_dunder_volatile(self) -> None:
+        self.assertEqual(len(_violations('asm __volatile__ ("nop");')), 0)
+
+    def test_initializer_list_continuation(self) -> None:
+        self.assertEqual(len(_violations(", mFoo(false) {")), 0)
+
+    def test_lambda_expression(self) -> None:
+        self.assertEqual(len(_violations("fl::thread t([ctx_shared, func]() {")), 0)
+
+    def test_nvic_call(self) -> None:
+        self.assertEqual(len(_violations("NVIC_EnableIRQ(handle_data->timer_irq);")), 0)
+
+    def test_nvic_set_priority(self) -> None:
+        self.assertEqual(
+            len(_violations("NVIC_SetPriority(handle_data->timer_irq, 0);")), 0
+        )
+
 
 # ── Realistic patterns ─────────────────────────────────────────────────────
 
 
 class TestRealistic(unittest.TestCase):
-    def test_channel_engine_class(self) -> None:
+    """Test realistic code patterns."""
+
+    def test_class_missing(self) -> None:
         code = """\
-class ChannelEngineSpi {
-    void show();
-    void poll();
-    bool canHandle(const ChannelDataPtr& data) const;
+class Semaphore {
+    void lock();
+    void unlock();
+    bool tryLock() const;
 };"""
         self.assertEqual(len(_violations(code)), 3)
 
-    def test_channel_engine_with_noexcept(self) -> None:
+    def test_class_with_noexcept(self) -> None:
         code = """\
-class ChannelEngineSpi {
-    void show() FL_NOEXCEPT;
-    void poll() FL_NOEXCEPT;
-    bool canHandle(const ChannelDataPtr& data) const FL_NOEXCEPT;
+class Semaphore {
+    void lock() FL_NOEXCEPT;
+    void unlock() FL_NOEXCEPT;
+    bool tryLock() const FL_NOEXCEPT;
 };"""
         self.assertEqual(len(_violations(code)), 0)
 
@@ -212,6 +300,15 @@ class Foo {
 };"""
         # Foo() constructor + stop() = 2 violations
         self.assertEqual(len(_violations(code)), 2)
+
+    def test_esp32_driver(self) -> None:
+        """ESP32 driver code is also checked."""
+        code = """\
+class ChannelEngineSpi {
+    void show();
+    void poll();
+};"""
+        self.assertEqual(len(_violations(code, path=_DRIVER_HEADER)), 2)
 
 
 if __name__ == "__main__":

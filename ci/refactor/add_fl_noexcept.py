@@ -15,7 +15,7 @@ Handles cases the single-line inserter cannot:
 Usage:
     uv run python ci/refactor/add_fl_noexcept.py --scope fl          # dry-run
     uv run python ci/refactor/add_fl_noexcept.py --scope fl --apply  # apply
-    uv run python ci/refactor/add_fl_noexcept.py --scope drivers     # ESP32 drivers
+    uv run python ci/refactor/add_fl_noexcept.py --scope platforms   # all platforms
 """
 
 import argparse
@@ -32,14 +32,14 @@ _NOEXCEPT_INCLUDE = '#include "fl/stl/noexcept.h"'
 
 # Scope → (translation_unit, file_matching_regex)
 _SCOPES: dict[str, list[tuple[str, str]]] = {
-    "drivers": [
-        ("ci/tools/_noexcept_check_tu.cpp", ".*platforms.esp.32.drivers.*"),
-    ],
     "fl": [
         ("src/fl/build/fl.cpp", ".*src.fl.*"),
     ],
+    "platforms": [
+        ("ci/tools/_noexcept_check_platforms_tu.cpp", ".*src.platforms.*"),
+    ],
     "all": [
-        ("ci/tools/_noexcept_check_tu.cpp", ".*platforms.esp.32.drivers.*"),
+        ("ci/tools/_noexcept_check_platforms_tu.cpp", ".*src.platforms.*"),
         ("src/fl/build/fl.cpp", ".*src.fl.*"),
     ],
 }

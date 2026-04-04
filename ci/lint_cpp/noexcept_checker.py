@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 # pyright: reportUnknownMemberType=false
-"""Checker to ensure functions in src/fl/ are marked FL_NOEXCEPT.
+"""Unified checker to ensure functions are marked FL_NOEXCEPT.
 
 FastLED compiles with C++ exceptions disabled (-fno-exceptions) on all
 embedded platforms. Marking functions FL_NOEXCEPT communicates this intent
 and allows the compiler to skip generating unwind tables.
 
-Uses the same fast regex-based detection as NoexceptEsp32Checker but
-scoped to src/fl/ (the core library).
+Uses fast regex-based detection to find function declarations missing
+FL_NOEXCEPT across both src/fl/ and src/platforms/.
 
-Scope: src/fl/** (all .h / .hpp / .cpp / .cpp.hpp files)
+Scope: src/fl/** and src/platforms/** (header files: .h / .hpp)
+
+Note: .cpp.hpp implementation files are excluded because regex-based
+detection has high false-positive rates on variable declarations and
+function calls in implementation code. Use the AST-based refactor tool
+(ci/refactor/add_fl_noexcept.py) for .cpp.hpp files.
 
 Exemptions:
   - src/fl/stl/noexcept.h (the macro definition itself)
@@ -20,6 +25,9 @@ Exemptions:
   - operator overloads
   - = delete / = default / = 0
   - Macro invocations (ALL_CAPS names)
+  - Inline assembly (asm volatile)
+  - Lambda expressions
+  - C API calls with ALL_CAPS prefix (NVIC_*, etc.)
 """
 
 import re
@@ -164,6 +172,20 @@ def _is_function_declaration(code: str) -> bool:
     # ALL_CAPS = macro call (FL_WARN, ESP_ERROR_CHECK, etc.)
     if re.match(r"^[A-Z][A-Z0-9_]*$", base_name):
         return False
+    # asm/volatile inline assembly
+    if base_name in ("asm", "volatile", "__volatile__", "__asm__"):
+        return False
+    # Initializer list continuation: , mFoo(...) {
+    if code.startswith(","):
+        return False
+    # Lambda expressions: fl::thread t([captures]() {
+    if "[" in code:
+        return False
+    # C API calls: NVIC_EnableIRQ(...), DuplicateHandle(...) — uppercase name
+    # with no return type prefix is ambiguous with constructors, but names
+    # containing underscores with an ALL_CAPS prefix are C function calls
+    if "_" in base_name and re.match(r"^[A-Z][A-Z0-9]*_", base_name):
+        return False
 
     # Has a return type prefix → declaration
     if prefix:
@@ -195,27 +217,36 @@ def _is_function_declaration(code: str) -> bool:
 # ============================================================================
 
 
-class NoexceptFlChecker(FileContentChecker):
-    """Checker that enforces FL_NOEXCEPT on functions in src/fl/."""
+class NoexceptFunctionChecker(FileContentChecker):
+    """Checker that enforces FL_NOEXCEPT on functions in src/fl/ and src/platforms/.
+
+    Supersedes the former NoexceptFlChecker, NoexceptEsp32Checker, and
+    NoexceptPlatformsChecker — all consolidated into this single class.
+    """
 
     def __init__(self) -> None:
         self.violations: dict[str, list[tuple[int, str]]] = {}
 
     def should_process_file(self, file_path: str) -> bool:
         normalized = file_path.replace("\\", "/")
-        if "/src/fl/" not in normalized and not normalized.startswith("src/fl/"):
+        # Must be in src/fl/ or src/platforms/ (accept both absolute and relative)
+        in_fl = "/src/fl/" in normalized or normalized.startswith("src/fl/")
+        in_platforms = "platforms/" in normalized
+        if not in_fl and not in_platforms:
             return False
         # Only check header files — .cpp.hpp implementation files have too many
-        # variable declarations that look like function declarations to regex
-        # (e.g. fl::unique_lock<fl::mutex> lock(mtx);).  Use the AST-based
-        # checker (ci/tools/check_noexcept.py) for .cpp.hpp files.
+        # variable declarations and function calls that look like declarations to
+        # regex. Use the AST-based refactor tool for .cpp.hpp files.
         if normalized.endswith(".cpp.hpp") or normalized.endswith(".cpp"):
             return False
         if not normalized.endswith((".h", ".hpp")):
             return False
+        # Skip the noexcept macro definition itself
         if normalized.endswith("noexcept.h") or normalized.endswith(
             "fl/stl/noexcept.h"
         ):
+            return False
+        if "compile_test" in normalized or "ASM_2_C_SHIM" in normalized:
             return False
         if "/third_party/" in normalized:
             return False
@@ -281,12 +312,15 @@ def main() -> None:
     from ci.util.check_files import run_checker_standalone
     from ci.util.paths import PROJECT_ROOT
 
-    checker = NoexceptFlChecker()
-    target_dir = str(PROJECT_ROOT / "src" / "fl")
+    checker = NoexceptFunctionChecker()
+    target_dirs = [
+        str(PROJECT_ROOT / "src" / "fl"),
+        str(PROJECT_ROOT / "src" / "platforms"),
+    ]
     run_checker_standalone(
         checker,
-        [target_dir],
-        "Found functions missing FL_NOEXCEPT in src/fl/",
+        target_dirs,
+        "Found functions missing FL_NOEXCEPT in src/fl/ or src/platforms/",
         extensions=[".h", ".hpp"],
     )
 

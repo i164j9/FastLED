@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Clang-tidy rule: enforce FL_NOEXCEPT on all functions in platforms/esp/32/drivers/.
+"""Clang-tidy rule: enforce FL_NOEXCEPT on all functions in src/platforms/.
 
-ESP32 compiles with -fno-exceptions but still generates .eh_frame unwind tables
-(~26KB bloat). Marking functions FL_NOEXCEPT lets the compiler skip unwind info.
+Embedded platforms compile with -fno-exceptions but toolchains may still
+generate .eh_frame unwind tables (~26KB bloat on ESP32). Marking functions
+FL_NOEXCEPT lets the compiler skip unwind info.
 
 Uses clang-query (AST analysis) for zero false positives, then inserts FL_NOEXCEPT
 at the correct position in function signatures.
 
 Usage:
-    uv run python ci/lint/clang_tidy/noexcept_esp32_drivers.py              # check only
-    uv run python ci/lint/clang_tidy/noexcept_esp32_drivers.py --fix        # auto-fix
+    uv run python ci/lint/clang_tidy/noexcept_platforms.py              # check only
+    uv run python ci/lint/clang_tidy/noexcept_platforms.py --fix        # auto-fix
 """
 
 import re
@@ -21,10 +22,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
-# Translation unit that pulls in all ESP32 driver headers via stub platform
-_TU = "ci/tools/_noexcept_check_tu.cpp"
+# Translation unit that pulls in all platform headers via stub platform
+_TU = "ci/tools/_noexcept_check_platforms_tu.cpp"
 
-_FILE_REGEX = ".*platforms.esp.32.drivers.*"
+_FILE_REGEX = ".*src.platforms.*"
 
 _COMPILER_ARGS = [
     "-std=c++17",
@@ -319,7 +320,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Clang-tidy rule: enforce FL_NOEXCEPT on ESP32 driver functions. "
+            "Clang-tidy rule: enforce FL_NOEXCEPT on platform functions. "
             "Uses clang-query AST analysis for zero false positives."
         )
     )
@@ -337,7 +338,7 @@ def main() -> int:
         return 1
 
     print(f"Using: {clang_query}")
-    print(f"Scope: platforms/esp/32/drivers/")
+    print(f"Scope: src/platforms/")
     print(f"Mode:  {'fix' if args.fix else 'check'}")
     print()
 
