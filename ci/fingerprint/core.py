@@ -5,8 +5,12 @@ Core Fingerprint Cache Implementations
 This module provides three fingerprint cache strategies:
 
 1. FingerprintCache: Legacy two-layer cache (mtime + MD5) for individual file tracking
-2. TwoLayerFingerprintCache: Efficient two-layer detection (mtime + MD5) for batch file tracking
-3. HashFingerprintCache: Single SHA256 hash for all files, optimized for concurrent access
+2. TwoLayerFingerprintCache: Glob-pattern based change detection using zccache-fingerprint CLI (blake3)
+3. HashFingerprintCache: Aggregate hash change detection using zccache-fingerprint CLI (blake3)
+
+TwoLayerFingerprintCache and HashFingerprintCache delegate to the Rust-based
+``zccache-fingerprint`` CLI for fast blake3 hashing with mtime fast-paths.
+The CLI handles file locking, crash-safe pending patterns, and smart touch handling.
 
 All caches follow the safe pattern:
 - check_needs_update(): Compute and store fingerprint before processing
@@ -16,12 +20,12 @@ All caches follow the safe pattern:
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, cast
-
-from ci.util.file_lock_rw import FileLock
+from typing import Any, Optional
 
 
 # ==============================================================================
@@ -305,20 +309,99 @@ class PendingFingerprint:
 
 
 # ==============================================================================
-# TwoLayerFingerprintCache (from ci/util/two_layer_fingerprint_cache.py)
+# zccache CLI helpers
+# ==============================================================================
+
+_ZCCACHE_BIN: str | None = None
+_ZCCACHE_FP_BIN: str | None = None
+
+
+def _find_zccache() -> str:
+    """Locate the main zccache binary (for daemon-backed ``fp`` subcommand)."""
+    global _ZCCACHE_BIN
+    if _ZCCACHE_BIN is not None:
+        return _ZCCACHE_BIN
+    found = shutil.which("zccache")
+    if found is not None:
+        _ZCCACHE_BIN = found
+    return found or ""
+
+
+def _find_zccache_fp() -> str:
+    """Locate the standalone zccache-fp binary (fallback)."""
+    global _ZCCACHE_FP_BIN
+    if _ZCCACHE_FP_BIN is not None:
+        return _ZCCACHE_FP_BIN
+    found = shutil.which("zccache-fp")
+    if found is None:
+        raise FileNotFoundError(
+            "zccache-fp binary not found on PATH. Install it with: pip install zccache"
+        )
+    _ZCCACHE_FP_BIN = found
+    return found
+
+
+def _run_zccache(
+    args: list[str], *, check: bool = False, timeout: float = 60.0
+) -> subprocess.CompletedProcess[str]:
+    """Run a zccache fingerprint CLI command.
+
+    Tries the daemon-backed ``zccache fp`` first (<1ms on cache hit).
+    Falls back to standalone ``zccache-fp`` if the daemon is unavailable.
+
+    Args:
+        args: Arguments after ``fp`` / the binary name.
+        check: If True, raise on non-zero exit.
+        timeout: Subprocess timeout in seconds.
+
+    Returns:
+        CompletedProcess with captured stdout/stderr.
+    """
+    # Try daemon-backed path first: ``zccache fp <args>``
+    zccache_bin = _find_zccache()
+    if zccache_bin:
+        cmd = [zccache_bin, "fp"] + args
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+        # exit 0 (run) or 1 (skip) are valid; exit 2+ means daemon error
+        if result.returncode in (0, 1):
+            if check and result.returncode not in (0, 1):
+                raise subprocess.CalledProcessError(
+                    result.returncode, cmd, result.stdout, result.stderr
+                )
+            return result
+
+    # Fallback to standalone: ``zccache-fp <args>``
+    cmd = [_find_zccache_fp()] + args
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=check,
+        timeout=timeout,
+    )
+
+
+# ==============================================================================
+# TwoLayerFingerprintCache — backed by zccache-fingerprint (blake3)
 # ==============================================================================
 
 
 class TwoLayerFingerprintCache:
     """
-    Two-layer file change detection with smart mtime updates.
+    Two-layer file change detection backed by the Rust ``zccache-fingerprint`` CLI.
 
     Provides efficient change detection by:
-    1. Fast modification time comparison (skip if unchanged)
-    2. Accurate content verification via MD5 hashing (when mtime differs)
-    3. Smart mtime updates when content matches but mtime changed
+    1. Fast mtime+size comparison (skip blake3 hash if unchanged)
+    2. blake3 content verification when mtime/size differ
+    3. Smart touch handling (content unchanged despite mtime change)
 
-    This is the recommended cache for lint and test operations.
+    The CLI handles file locking and crash-safe pending patterns internally.
     """
 
     def __init__(self, cache_dir: Path, subpath: str):
@@ -336,304 +419,127 @@ class TwoLayerFingerprintCache:
         self.fingerprint_dir = cache_dir / "fingerprint"
         self.fingerprint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Cache and lock file paths
+        # Cache file path (same location as before for migration transparency)
         self.cache_file = self.fingerprint_dir / f"{subpath}.json"
-        self.lock_file = self.fingerprint_dir / f"{subpath}.lock"
 
-        # Pending fingerprint data (stored before linting starts)
-        self._pending_fingerprint: PendingFingerprint | None = None
-
-    def _compute_md5(self, file_path: Path) -> str:
-        """
-        Compute MD5 hash of file content.
-
-        Args:
-            file_path: Path to file to hash
-
-        Returns:
-            MD5 hash as hexadecimal string
-
-        Raises:
-            IOError: If file cannot be read
-        """
-        try:
-            hasher = hashlib.md5()
-            with open(file_path, "rb") as f:
-                # Read in chunks to handle large files efficiently
-                for chunk in iter(lambda: f.read(8192), b""):
-                    hasher.update(chunk)
-            return hasher.hexdigest()
-        except IOError as e:
-            raise IOError(f"Cannot read file {file_path}: {e}") from e
-
-    def _read_cache_data(self) -> dict[str, dict[str, float | str]]:
-        """
-        Read cache data from JSON file (should be called within lock context).
-
-        Returns:
-            Cache data dict mapping absolute paths to {mtime, hash} or empty dict
-        """
-        if not self.cache_file.exists():
-            return {}
-
-        try:
-            with open(self.cache_file, "r") as f:
-                data: Any = json.load(f)
-                # Ensure data is a dict (backward compatibility)
-                if isinstance(data, dict) and "files" in data:
-                    files_value = data["files"]  # type: ignore[misc]
-                    if isinstance(files_value, dict):
-                        return cast(dict[str, dict[str, float | str]], files_value)
-                if isinstance(data, dict):
-                    return cast(dict[str, dict[str, float | str]], data)
-                return {}
-        except (json.JSONDecodeError, OSError):
-            # Cache corrupted - start fresh
-            return {}
-
-    def _write_cache_data(self, cache_data: dict[str, dict[str, float | str]]) -> None:
-        """
-        Write cache data to JSON file (should be called within lock context).
-
-        Args:
-            cache_data: Per-file cache data to write
-        """
-        try:
-            with open(self.cache_file, "w") as f:
-                json.dump({"files": cache_data}, f, indent=2)
-        except OSError as e:
-            raise RuntimeError(
-                f"Failed to write cache file {self.cache_file}: {e}"
-            ) from e
-
-    def _save_pending_fingerprint(self, fingerprint: PendingFingerprint) -> None:
-        """Save pending fingerprint to file for cross-process access."""
-        pending_file = self.cache_file.with_suffix(".pending")
-        try:
-            with open(pending_file, "w") as f:
-                json.dump(asdict(fingerprint), f, indent=2)
-        except OSError:
-            # Non-fatal - will fall back to in-memory if needed
-            pass
-
-    def _load_pending_fingerprint(self) -> PendingFingerprint | None:
-        """Load pending fingerprint from file."""
-        pending_file = self.cache_file.with_suffix(".pending")
-        if not pending_file.exists():
-            return None
-
-        try:
-            with open(pending_file, "r") as f:
-                data: Any = json.load(f)
-                return PendingFingerprint(
-                    timestamp=data["timestamp"],
-                    file_count=data["file_count"],
-                    files=data["files"],
-                )
-        except (json.JSONDecodeError, OSError, KeyError):
-            return None
-
-    def _clear_pending_fingerprint(self) -> None:
-        """Remove the pending fingerprint file."""
-        pending_file = self.cache_file.with_suffix(".pending")
-        if pending_file.exists():
-            try:
-                pending_file.unlink()
-            except OSError:
-                pass
-
-    def check_needs_update(self, file_paths: list[Path]) -> bool:
+    def check_needs_update(
+        self,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+        *,
+        root: str = ".",
+        ext: list[str] | None = None,
+    ) -> bool:
         """
         Check if files need to be processed using two-layer detection.
 
-        Layer 1: Fast mtime check - if all mtimes match cached values, skip
-        Layer 2: Content hash - compute MD5 only for files with changed mtimes
+        Delegates to ``zccache-fingerprint --cache-type two-layer check``.
+        Exit 0 = run needed (files changed).
+        Exit 1 = skip (cache hit, no changes).
 
-        Smart optimization: If content matches despite mtime change, updates
-        the cached mtime to avoid redundant hashing on next run.
+        Use ``ext`` + ``root`` for fastest scanning (simple suffix match,
+        scoped directory walk).  Use ``include`` for glob-pattern matching.
 
         Args:
-            file_paths: List of file paths to check
+            include: Glob patterns for files to monitor (e.g., ["src/**/*.cpp"]).
+                     Cannot be combined with ``ext``.
+            exclude: Optional patterns to exclude.
+            root: Root directory for scanning (default: ".").
+            ext: File extensions without dot (e.g., ["h", "cpp"]).
+                 Faster than ``include`` — uses simple suffix match.
+                 Cannot be combined with ``include``.
 
         Returns:
-            True if processing is needed, False if cache is valid
+            True if processing is needed, False if cache is valid.
         """
-        with FileLock(
-            self.lock_file, timeout=30.0, operation=f"fingerprint:{self.subpath}:check"
-        ):
-            cache_data = self._read_cache_data()
-            needs_update = False
-            updated_cache = cache_data.copy()
+        args = [
+            "--cache-file",
+            str(self.cache_file),
+            "--cache-type",
+            "two-layer",
+            "check",
+            "--root",
+            root,
+        ]
+        if ext:
+            for e in ext:
+                args.extend(["--ext", e])
+        elif include:
+            for pattern in include:
+                args.extend(["--include", pattern])
+        if exclude:
+            for pattern in exclude:
+                args.extend(["--exclude", pattern])
 
-            for file_path in file_paths:
-                if not file_path.exists():
-                    # File deleted - needs update
-                    needs_update = True
-                    file_key = str(file_path.resolve())
-                    if file_key in updated_cache:
-                        del updated_cache[file_key]
-                    continue
-
-                file_key = str(file_path.resolve())
-                current_mtime = file_path.stat().st_mtime
-
-                if file_key in cache_data:
-                    cached_entry = cache_data[file_key]
-                    cached_mtime = cached_entry.get("mtime", 0)
-                    cached_hash = cached_entry.get("hash", "")
-
-                    # Layer 1: Fast mtime check
-                    if current_mtime == cached_mtime:
-                        # No change - keep in cache as-is
-                        continue
-
-                    # Layer 2: Content verification (mtime changed)
-                    current_hash = self._compute_md5(file_path)
-
-                    if current_hash == cached_hash:
-                        # Content unchanged despite mtime change (e.g., touch)
-                        # Update cached mtime to avoid future hashing
-                        updated_cache[file_key] = {
-                            "mtime": current_mtime,
-                            "hash": cached_hash,
-                        }
-                        # Don't set needs_update - content is identical
-                    else:
-                        # Content actually changed
-                        updated_cache[file_key] = {
-                            "mtime": current_mtime,
-                            "hash": current_hash,
-                        }
-                        needs_update = True
-                else:
-                    # New file - compute hash and add to cache
-                    current_hash = self._compute_md5(file_path)
-                    updated_cache[file_key] = {
-                        "mtime": current_mtime,
-                        "hash": current_hash,
-                    }
-                    needs_update = True
-
-            # Check for files in cache that are no longer being monitored
-            # This detects when files are deleted from disk between runs
-            cached_file_keys = set(cache_data.keys())
-            current_file_keys = {str(fp.resolve()) for fp in file_paths}
-            removed_files = cached_file_keys - current_file_keys
-
-            if removed_files:
-                needs_update = True  # File was removed from monitored set
-                for file_key in removed_files:
-                    if file_key in updated_cache:
-                        del updated_cache[file_key]
-
-            # Store pending fingerprint for mark_success()
-            self._pending_fingerprint = PendingFingerprint(
-                timestamp=time.time(),
-                file_count=len(file_paths),
-                files=updated_cache,
-            )
-
-            # Save pending fingerprint to file for cross-process access
-            self._save_pending_fingerprint(self._pending_fingerprint)
-
-            # If we updated mtimes (touch case), save cache immediately
-            # This ensures next run doesn't re-hash these files
-            if not needs_update and updated_cache != cache_data:
-                self._write_cache_data(updated_cache)
-
-            return needs_update
+        result = _run_zccache(args)
+        # exit 0 = run needed, exit 1 = skip (cache hit), exit 2+ = error (fail-safe: run)
+        return result.returncode != 1
 
     def mark_success(self) -> None:
         """
         Mark processing as successful using the pre-computed fingerprint.
 
-        This saves the cache state that was computed during check_needs_update(),
-        including any smart mtime updates from the touch optimization.
+        Promotes the pending fingerprint (stored by ``check``) to the main cache.
         """
-        # Try to load from file first (cross-process support)
-        fingerprint_data = self._load_pending_fingerprint()
+        _run_zccache(
+            ["--cache-file", str(self.cache_file), "mark-success"],
+            check=True,
+        )
 
-        # Fall back to in-memory (single-process case)
-        if fingerprint_data is None:
-            fingerprint_data = self._pending_fingerprint
-
-        if fingerprint_data is None:
-            raise RuntimeError(
-                "mark_success() called without prior check_needs_update()"
-            )
-
-        with FileLock(
-            self.lock_file,
-            timeout=30.0,
-            operation=f"fingerprint:{self.subpath}:mark_success",
-        ):
-            self._write_cache_data(fingerprint_data.files)
-
-        # Clear pending data (both file and memory)
-        self._clear_pending_fingerprint()
-        self._pending_fingerprint = None
+    def mark_failure(self) -> None:
+        """Mark the previous check as failed, forcing re-run next time."""
+        _run_zccache(
+            ["--cache-file", str(self.cache_file), "mark-failure"],
+            check=True,
+        )
 
     def invalidate(self) -> None:
         """
-        Invalidate the cache by removing the cache file.
+        Invalidate the cache by deleting the cache file.
 
-        This forces the next validation to return True (needs update).
+        Forces the next check to return True (needs update).
         """
-        with FileLock(
-            self.lock_file,
-            timeout=30.0,
-            operation=f"fingerprint:{self.subpath}:invalidate",
-        ):
-            if self.cache_file.exists():
-                try:
-                    self.cache_file.unlink()
-                except OSError as e:
-                    raise RuntimeError(
-                        f"Failed to invalidate cache file {self.cache_file}: {e}"
-                    ) from e
+        _run_zccache(
+            ["--cache-file", str(self.cache_file), "invalidate"],
+            check=True,
+        )
 
     def get_cache_info(self) -> dict[str, int | bool | str] | None:
         """
         Get information about the current cache state.
 
         Returns:
-            Dict with cache information or None if no cache exists
+            Dict with cache information or None if no cache exists.
         """
-        with FileLock(
-            self.lock_file,
-            timeout=30.0,
-            operation=f"fingerprint:{self.subpath}:get_cache_info",
-        ):
-            cache_data = self._read_cache_data()
-            if not cache_data:
-                return None
-
-            return {
-                "file_count": len(cache_data),
-                "cache_file": str(self.cache_file),
-                "cache_exists": self.cache_file.exists(),
-            }
+        if not self.cache_file.exists():
+            return None
+        return {
+            "cache_file": str(self.cache_file),
+            "cache_exists": True,
+            "subpath": self.subpath,
+        }
 
 
 # ==============================================================================
-# HashFingerprintCache (from ci/util/hash_fingerprint_cache.py)
+# HashFingerprintCache — backed by zccache-fingerprint (blake3)
 # ==============================================================================
 
 
 class HashFingerprintCache:
     """
-    Hash-based fingerprint cache with file locking for concurrent access.
+    Aggregate hash-based fingerprint cache backed by ``zccache-fingerprint`` CLI.
 
-    Generates a single SHA256 hash from all provided file paths and their modification times.
-    Uses compare-and-swap operations to prevent race conditions when multiple processes
-    are validating and updating the same cache.
+    Generates a single blake3 hash from the entire file set.  All-or-nothing:
+    if any file changes, the whole set is considered dirty.
 
-    This is optimized for scenarios where you need a single cache validation for
-    many files, such as build systems or test runners.
+    Best for "run all tests" or "compile all examples" style decisions.
     """
 
     def __init__(
-        self, cache_dir: Path, subpath: str, timestamp_file: Optional[Path] = None
+        self,
+        cache_dir: Path,
+        subpath: str,
+        timestamp_file: Optional[Path] = None,
     ):
         """
         Initialize hash fingerprint cache.
@@ -641,7 +547,7 @@ class HashFingerprintCache:
         Args:
             cache_dir: Base cache directory (e.g., Path(".cache"))
             subpath: Subdirectory name for this cache (e.g., "js_lint", "native_build")
-            timestamp_file: Optional path to write timestamp when changes are detected
+            timestamp_file: Optional path to write timestamp when changes are detected.
         """
         self.cache_dir = cache_dir
         self.subpath = subpath
@@ -651,122 +557,112 @@ class HashFingerprintCache:
         self.fingerprint_dir = cache_dir / "fingerprint"
         self.fingerprint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Cache and lock file paths
+        # Cache file path
         self.cache_file = self.fingerprint_dir / f"{subpath}.json"
-        self.lock_file = self.fingerprint_dir / f"{subpath}.lock"
 
-    def _get_file_hash_data(self, file_paths: list[Path]) -> str:
+    def check_needs_update(
+        self,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+        *,
+        root: str = ".",
+        ext: list[str] | None = None,
+    ) -> bool:
         """
-        Generate hash data from file paths and modification times.
+        Check if files need to be processed.
+
+        Delegates to ``zccache-fingerprint --cache-type hash check``.
+        Exit 0 = run needed.  Exit 1 = skip (cache hit).
+
+        Use ``ext`` + ``root`` for fastest scanning (simple suffix match,
+        scoped directory walk).  Use ``include`` for glob-pattern matching.
 
         Args:
-            file_paths: List of file paths to include in hash
+            include: Glob patterns for files to monitor.
+                     Cannot be combined with ``ext``.
+            exclude: Optional patterns to exclude.
+            root: Root directory for scanning (default: ".").
+            ext: File extensions without dot (e.g., ["h", "cpp"]).
+                 Faster than ``include`` — uses simple suffix match.
+                 Cannot be combined with ``include``.
 
         Returns:
-            SHA256 hash as hexadecimal string
+            True if processing is needed, False if cache is valid.
         """
-        hasher = hashlib.sha256()
+        args = [
+            "--cache-file",
+            str(self.cache_file),
+            "--cache-type",
+            "hash",
+            "check",
+            "--root",
+            root,
+        ]
+        if ext:
+            for e in ext:
+                args.extend(["--ext", e])
+        elif include:
+            for pattern in include:
+                args.extend(["--include", pattern])
+        if exclude:
+            for pattern in exclude:
+                args.extend(["--exclude", pattern])
 
-        # Sort paths for consistent ordering
-        file_paths.sort(key=str)
+        result = _run_zccache(args)
 
-        for file_path in file_paths:
-            if file_path.exists() and file_path.is_file():
-                # Include file path and modification time
-                hasher.update(str(file_path.resolve()).encode("utf-8"))
-                hasher.update(str(os.path.getmtime(file_path)).encode("utf-8"))
-            else:
-                # File doesn't exist - include path with special marker
-                hasher.update(str(file_path.resolve()).encode("utf-8"))
-                hasher.update(b"MISSING_FILE")
+        needs_update = result.returncode != 1
 
-        # Include count of files to detect changes in file list
-        hasher.update(f"file_count:{len(file_paths)}".encode("utf-8"))
+        # Write timestamp file on change (preserves existing feature)
+        if needs_update and self.timestamp_file is not None:
+            self._write_timestamp_file()
 
-        return hasher.hexdigest()
+        return needs_update
 
-    def _store_pending_fingerprint(
-        self, hash_value: str, timestamp: float, file_count: int
-    ) -> None:
-        """Store pending fingerprint data in a temporary cache file."""
-        pending_file = self.cache_file.with_suffix(".pending")
-        pending_data = {
-            "hash": hash_value,
-            "timestamp": timestamp,
-            "file_count": file_count,
+    def mark_success(self) -> None:
+        """Mark processing as successful (promotes pending → main cache)."""
+        _run_zccache(
+            ["--cache-file", str(self.cache_file), "mark-success"],
+            check=True,
+        )
+
+    def mark_failure(self) -> None:
+        """Mark the previous check as failed, forcing re-run next time."""
+        _run_zccache(
+            ["--cache-file", str(self.cache_file), "mark-failure"],
+            check=True,
+        )
+
+    def invalidate(self) -> None:
+        """Delete the cache file (forces re-run on next check)."""
+        _run_zccache(
+            ["--cache-file", str(self.cache_file), "invalidate"],
+            check=True,
+        )
+
+    def get_cache_info(self) -> Optional[dict[str, Any]]:
+        """
+        Get information about the current cache state.
+
+        Returns:
+            Dict with cache information or None if no cache exists.
+        """
+        if not self.cache_file.exists():
+            return None
+        return {
+            "cache_file": str(self.cache_file),
+            "cache_exists": True,
             "subpath": self.subpath,
         }
-
-        try:
-            with open(pending_file, "w") as f:
-                json.dump(pending_data, f, indent=2)
-        except OSError:
-            # If we can't store pending data, that's okay - we'll fall back to force update
-            pass
-
-    def _load_pending_fingerprint(self) -> Optional[dict[str, Any]]:
-        """Load pending fingerprint data from temporary cache file."""
-        pending_file = self.cache_file.with_suffix(".pending")
-        if not pending_file.exists():
-            return None
-
-        try:
-            with open(pending_file, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return None
-
-    def _clear_pending_fingerprint(self) -> None:
-        """Remove the pending fingerprint file."""
-        pending_file = self.cache_file.with_suffix(".pending")
-        if pending_file.exists():
-            try:
-                pending_file.unlink()
-            except OSError:
-                pass
-
-    def _write_timestamp_file(
-        self, timestamp: float, file_count: int, hash_value: str
-    ) -> None:
-        """
-        Write timestamp file when changes are detected.
-
-        Args:
-            timestamp: Unix timestamp of when changes were detected
-            file_count: Number of files monitored
-            hash_value: Current hash value
-        """
-        if self.timestamp_file is None:
-            return
-
-        try:
-            # Create parent directory if needed
-            self.timestamp_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write timestamp data in JSON format
-            timestamp_data = {
-                "timestamp": timestamp,
-                "file_count": file_count,
-                "hash": hash_value,
-                "subpath": self.subpath,
-            }
-
-            with open(self.timestamp_file, "w") as f:
-                json.dump(timestamp_data, f, indent=2)
-        except OSError:
-            # Non-fatal error - log but don't fail
-            pass
 
     def get_last_change_timestamp(self) -> Optional[float]:
         """
         Get the timestamp of the last detected change.
 
         Returns:
-            Unix timestamp or None if no timestamp file exists
+            Unix timestamp or None if no timestamp file exists.
         """
         if self.timestamp_file is None or not self.timestamp_file.exists():
             return None
-
         try:
             with open(self.timestamp_file, "r") as f:
                 data = json.load(f)
@@ -774,200 +670,17 @@ class HashFingerprintCache:
         except (json.JSONDecodeError, OSError):
             return None
 
-    def get_current_hash(self, file_paths: list[Path]) -> str:
-        """
-        Get current hash for the given file paths.
-
-        Args:
-            file_paths: List of file paths to hash
-
-        Returns:
-            SHA256 hash of current state
-        """
-        return self._get_file_hash_data(file_paths)
-
-    def _read_cache_data(self) -> Optional[dict[str, Any]]:
-        """
-        Read cache data from JSON file (should be called within lock context).
-
-        Returns:
-            Cache data dict or None if file doesn't exist or is corrupted
-        """
-        if not self.cache_file.exists():
-            return None
-
+    def _write_timestamp_file(self) -> None:
+        """Write timestamp file when changes are detected."""
+        if self.timestamp_file is None:
+            return
         try:
-            with open(self.cache_file, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return None
-
-    def _write_cache_data(self, data: dict[str, Any]) -> None:
-        """
-        Write cache data to JSON file (should be called within lock context).
-
-        Args:
-            data: Cache data to write
-        """
-        try:
-            with open(self.cache_file, "w") as f:
-                json.dump(data, f, indent=2)
-        except OSError as e:
-            raise RuntimeError(f"Failed to write cache file {self.cache_file}: {e}")
-
-    def is_valid(self, file_paths: list[Path]) -> bool:
-        """
-        Check if the current file state matches the cached hash.
-
-        Note: This method is deprecated in favor of check_needs_update().
-        Use check_needs_update() for new code as it follows the safe pattern.
-
-        Args:
-            file_paths: List of file paths to validate
-
-        Returns:
-            True if cached hash matches current state, False otherwise
-        """
-        current_hash = self.get_current_hash(file_paths)
-
-        # Use read lock for validation
-        with FileLock(
-            self.lock_file,
-            timeout=30.0,
-            operation=f"fingerprint:{self.subpath}:is_valid",
-        ):
-            cache_data = self._read_cache_data()
-            if cache_data is None:
-                return False
-
-            cached_hash = cache_data.get("hash")
-            return cached_hash == current_hash
-
-    def check_needs_update(self, file_paths: list[Path]) -> bool:
-        """
-        Check if files need to be processed and store fingerprint for later use.
-
-        This is the safe pattern: compute fingerprint before processing, store it
-        in the cache file temporarily, and use the stored fingerprint in mark_success()
-        regardless of file changes during processing.
-
-        Args:
-            file_paths: List of file paths to check
-
-        Returns:
-            True if processing is needed, False if cache is valid
-        """
-        current_hash = self.get_current_hash(file_paths)
-        current_time = time.time()
-
-        # Check if cache is valid
-        with FileLock(
-            self.lock_file,
-            timeout=30.0,
-            operation=f"fingerprint:{self.subpath}:check_needs_update",
-        ):
-            cache_data = self._read_cache_data()
-            if cache_data is None:
-                # No cache - store pending fingerprint and return needs update
-                self._store_pending_fingerprint(
-                    current_hash, current_time, len(file_paths)
-                )
-                return True
-
-            cached_hash = cache_data.get("hash")
-            needs_update = cached_hash != current_hash
-
-            if needs_update:
-                # Store pending fingerprint for successful completion
-                self._store_pending_fingerprint(
-                    current_hash, current_time, len(file_paths)
-                )
-
-            return needs_update
-
-    def mark_success(self) -> None:
-        """
-        Mark processing as successful using the pre-computed fingerprint.
-
-        This method uses the fingerprint stored by check_needs_update(),
-        making it immune to file changes during processing. Works across
-        process boundaries by storing pending data in a temporary file.
-        """
-        # Try to load pending fingerprint from file (cross-process safe)
-        fingerprint_data = self._load_pending_fingerprint()
-
-        # Fall back to in-memory pending fingerprint (single-process case)
-        if fingerprint_data is None and hasattr(self, "_pending_fingerprint"):
-            pending_fp: dict[str, Any] = getattr(self, "_pending_fingerprint")
-            fingerprint_data = pending_fp.copy()
-            fingerprint_data["subpath"] = self.subpath
-
-        if fingerprint_data is None:
-            raise RuntimeError(
-                "mark_success() called without prior check_needs_update()"
-            )
-
-        # Save using write lock
-        with FileLock(
-            self.lock_file,
-            timeout=30.0,
-            operation=f"fingerprint:{self.subpath}:mark_success",
-        ):
-            self._write_cache_data(fingerprint_data)
-
-            # Write timestamp file if configured
-            if fingerprint_data and self.timestamp_file is not None:
-                self._write_timestamp_file(
-                    timestamp=fingerprint_data.get("timestamp", time.time()),
-                    file_count=fingerprint_data.get("file_count", 0),
-                    hash_value=fingerprint_data.get("hash", ""),
-                )
-
-        # Clean up stored fingerprints
-        self._clear_pending_fingerprint()
-        if hasattr(self, "_pending_fingerprint"):
-            delattr(self, "_pending_fingerprint")
-
-    def invalidate(self) -> None:
-        """
-        Invalidate the cache by removing the cache file.
-
-        This forces the next validation to return False.
-        """
-        with FileLock(
-            self.lock_file,
-            timeout=30.0,
-            operation=f"fingerprint:{self.subpath}:invalidate",
-        ):
-            if self.cache_file.exists():
-                try:
-                    self.cache_file.unlink()
-                except OSError as e:
-                    raise RuntimeError(
-                        f"Failed to invalidate cache file {self.cache_file}: {e}"
-                    )
-
-    def get_cache_info(self) -> Optional[dict[str, Any]]:
-        """
-        Get information about the current cache state.
-
-        Returns:
-            Dict with cache information or None if no cache exists
-        """
-        with FileLock(
-            self.lock_file,
-            timeout=30.0,
-            operation=f"fingerprint:{self.subpath}:get_cache_info",
-        ):
-            cache_data = self._read_cache_data()
-            if cache_data is None:
-                return None
-
-            return {
-                "hash": cache_data.get("hash"),
-                "timestamp": cache_data.get("timestamp"),
-                "subpath": cache_data.get("subpath"),
-                "file_count": cache_data.get("file_count"),
-                "cache_file": str(self.cache_file),
-                "cache_exists": self.cache_file.exists(),
+            self.timestamp_file.parent.mkdir(parents=True, exist_ok=True)
+            timestamp_data = {
+                "timestamp": time.time(),
+                "subpath": self.subpath,
             }
+            with open(self.timestamp_file, "w") as f:
+                json.dump(timestamp_data, f, indent=2)
+        except OSError:
+            pass

@@ -8,47 +8,27 @@ Python Linting Cache Integration
 Monitors Python source files and configuration to determine if
 pyright type checking needs to be re-run.
 
-Uses the unified safe fingerprint cache system.
+Uses zccache-fingerprint (Rust/blake3) for fast change detection.
 """
 
 import sys
 from pathlib import Path
 
-# Import the two-layer fingerprint cache (mtime + content hash)
 from ci.fingerprint import TwoLayerFingerprintCache
 from ci.util.color_output import print_cache_hit, print_cache_miss
 
 
-def get_python_files() -> list[Path]:
-    """
-    Get all Python files that should be monitored for changes.
+# Glob patterns for Python lint monitoring
+_PYTHON_LINT_INCLUDE = [
+    "test.py",
+    "ci/**/*.py",
+    "pyproject.toml",
+]
 
-    Returns:
-        List of Python file paths to monitor
-    """
-    files: list[Path] = []
-
-    # Add test.py
-    test_py = Path("test.py")
-    if test_py.exists():
-        files.append(test_py)
-
-    # Add Python files in ci/ directory (excluding ci/tmp/ and ci/wasm/)
-    ci_dir = Path("ci")
-    if ci_dir.exists():
-        for py_file in ci_dir.glob("**/*.py"):
-            # Skip excluded directories
-            if "ci/tmp/" in str(py_file) or "ci/wasm/" in str(py_file):
-                continue
-            files.append(py_file)
-
-    # Add pyproject.toml (pyright configuration)
-    pyproject = Path("pyproject.toml")
-    if pyproject.exists():
-        files.append(pyproject)
-
-    files.sort(key=str)
-    return files
+_PYTHON_LINT_EXCLUDE = [
+    "ci/tmp/**",
+    "ci/wasm/**",
+]
 
 
 def _get_python_lint_cache() -> TwoLayerFingerprintCache:
@@ -61,31 +41,20 @@ def check_python_files_changed() -> bool:
     """
     Check if Python files have changed since the last successful lint run.
 
-    Uses the safe pre-computed fingerprint pattern to avoid race conditions.
+    Uses zccache-fingerprint for blake3-based change detection.
 
     Returns:
         True if files changed and pyright should run
         False if no changes detected and pyright can be skipped
     """
-    # Get all Python files to monitor
-    file_paths = get_python_files()
-
-    if not file_paths:
-        print("📝 No Python files found - skipping pyright")
-        return False
-
-    # Use the safe pattern: check_needs_update stores fingerprint for later use
     cache = _get_python_lint_cache()
-    needs_update = cache.check_needs_update(file_paths)
+    needs_update = cache.check_needs_update(
+        include=_PYTHON_LINT_INCLUDE,
+        exclude=_PYTHON_LINT_EXCLUDE,
+    )
 
     if needs_update:
         print_cache_miss("Python files changed - running pyright")
-        print(f"   Monitoring {len(file_paths)} files")
-        if len(file_paths) <= 5:
-            for f in file_paths:
-                print(f"     {f}")
-        else:
-            print(f"     {file_paths[0]} ... {file_paths[-1]}")
         return True
     else:
         print_cache_hit("No Python changes detected - skipping pyright")

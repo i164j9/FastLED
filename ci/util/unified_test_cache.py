@@ -4,12 +4,53 @@ Unified Test Caching
 
 Provides unified safe fingerprint caching for test.py to replace the multiple
 custom fingerprint implementations with the single safe approach.
+
+Uses zccache-fingerprint (Rust/blake3) for fast change detection.
 """
 
 from pathlib import Path
 from typing import Optional
 
 from ci.fingerprint import HashFingerprintCache
+
+
+# Glob patterns for each cache type
+SRC_CODE_INCLUDE = [
+    "src/**/*.h",
+    "src/**/*.hpp",
+    "src/**/*.cpp",
+    "src/**/*.c",
+]
+
+CPP_TEST_INCLUDE = [
+    "src/**/*.h",
+    "src/**/*.hpp",
+    "src/**/*.cpp",
+    "src/**/*.c",
+    "tests/**/*.h",
+    "tests/**/*.hpp",
+    "tests/**/*.cpp",
+    "tests/**/*.c",
+]
+
+EXAMPLES_INCLUDE = [
+    "src/**/*.h",
+    "src/**/*.hpp",
+    "src/**/*.cpp",
+    "src/**/*.c",
+    "examples/**/*.ino",
+    "examples/**/*.h",
+    "examples/**/*.hpp",
+    "examples/**/*.cpp",
+    "examples/**/*.c",
+]
+
+PYTHON_TEST_INCLUDE = [
+    "test*.py",
+    "ci/**/*.py",
+    "**/test_*.py",
+    "pyproject.toml",
+]
 
 
 class UnifiedTestCache:
@@ -29,13 +70,22 @@ class UnifiedTestCache:
         )
         self.cache_name = cache_name
 
-    def check_needs_update(self, files_to_monitor: list[Path]) -> bool:
+    def check_needs_update(
+        self,
+        include: list[str],
+        exclude: list[str] | None = None,
+    ) -> bool:
         """
         Check if files have changed and need processing.
 
-        Uses the unified safe pattern: stores fingerprint for later success marking.
+        Args:
+            include: Glob patterns for files to monitor.
+            exclude: Optional glob patterns to exclude.
+
+        Returns:
+            True if processing is needed, False if cache is valid.
         """
-        return self.cache.check_needs_update(files_to_monitor)
+        return self.cache.check_needs_update(include=include, exclude=exclude)
 
     def mark_success(self) -> None:
         """Mark the test/process as successful."""
@@ -70,68 +120,3 @@ def create_examples_cache() -> UnifiedTestCache:
 def create_python_test_cache() -> UnifiedTestCache:
     """Create cache for Python test fingerprinting."""
     return UnifiedTestCache("python_test")
-
-
-def get_src_code_files() -> list[Path]:
-    """Get all source code files to monitor."""
-    files: list[Path] = []
-
-    # Add all source files
-    src_dir = Path("src")
-    if src_dir.exists():
-        for pattern in ("**/*.h", "**/*.hpp", "**/*.cpp", "**/*.c"):
-            files.extend(src_dir.glob(pattern))
-
-    files.sort(key=str)
-    return files
-
-
-def get_cpp_test_files() -> list[Path]:
-    """Get all C++ test files to monitor."""
-    files: list[Path] = []
-
-    # Add test files
-    tests_dir = Path("tests")
-    if tests_dir.exists():
-        for pattern in ("**/*.h", "**/*.hpp", "**/*.cpp", "**/*.c"):
-            files.extend(tests_dir.glob(pattern))
-
-    # Also include source files as dependencies
-    files.extend(get_src_code_files())
-
-    files.sort(key=str)
-    return files
-
-
-def get_examples_files() -> list[Path]:
-    """Get all example files to monitor."""
-    files: list[Path] = []
-
-    # Add example files
-    examples_dir = Path("examples")
-    if examples_dir.exists():
-        for pattern in ("**/*.ino", "**/*.h", "**/*.hpp", "**/*.cpp", "**/*.c"):
-            files.extend(examples_dir.glob(pattern))
-
-    # Also include source files as dependencies
-    files.extend(get_src_code_files())
-
-    files.sort(key=str)
-    return files
-
-
-def get_python_test_files() -> list[Path]:
-    """Get all Python test files to monitor."""
-    files: list[Path] = []
-
-    # Add Python test files
-    for pattern in ("test*.py", "ci/**/*.py", "**/test_*.py"):
-        files.extend(Path(".").glob(pattern))
-
-    # Add pyproject.toml for configuration changes
-    pyproject = Path("pyproject.toml")
-    if pyproject.exists():
-        files.append(pyproject)
-
-    files.sort(key=str)
-    return files

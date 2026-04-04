@@ -266,16 +266,17 @@ def test_cache_file_storage(test: CacheLintStressTest) -> None:
     for cache_file in expected_files:
         cache_path = cache_dir / cache_file
         if cache_path.exists():
-            # Verify it's valid JSON
+            # Verify it's valid JSON (zccache-fingerprint format)
             try:
                 with open(cache_path, "r") as f:
                     data = json.load(f)
-                    if "hash" in data and "timestamp" in data:
+                    # zccache-fingerprint writes {version, status, timestamp_ns, files/hash}
+                    if "version" in data:
                         found_count += 1
-                        test.pass_test(f"Cache file {cache_file} is valid JSON")
+                        test.pass_test(f"Cache file {cache_file} is valid zccache JSON")
                     else:
                         test.fail_test(
-                            f"Cache file {cache_file}", "Missing required fields"
+                            f"Cache file {cache_file}", "Missing 'version' field"
                         )
             except json.JSONDecodeError as e:
                 test.fail_test(f"Cache file {cache_file}", f"Invalid JSON: {e}")

@@ -8,7 +8,7 @@ C++ Linting Cache Integration
 Monitors C++ source files (src/, examples/, and tests/) to determine if
 C++ linting (clang-format + custom linters) needs to be re-run.
 
-Uses the unified safe fingerprint cache system.
+Uses zccache-fingerprint (Rust/blake3) for fast change detection.
 """
 
 import sys
@@ -19,61 +19,42 @@ from ci.util.color_output import print_cache_hit, print_cache_miss
 from ci.util.dependency_loader import DependencyManifest
 
 
-def get_cpp_files() -> list[Path]:
-    """
-    Get all C++ files that should be monitored for changes.
+# Default glob patterns for C++ linting (used when DependencyManifest is unavailable)
+_DEFAULT_CPP_LINT_GLOBS = [
+    "src/**/*.cpp",
+    "src/**/*.h",
+    "src/**/*.hpp",
+    "src/**/*.c",
+    "examples/**/*.ino",
+    "examples/**/*.cpp",
+    "examples/**/*.h",
+    "examples/**/*.hpp",
+    "tests/**/*.cpp",
+    "tests/**/*.hpp",
+    "ci/lint_cpp/*.py",
+]
 
-    Loads patterns from centralized dependencies.json manifest.
+
+def _get_cpp_lint_patterns() -> tuple[list[str], list[str]]:
+    """
+    Get glob include/exclude patterns for C++ lint monitoring.
+
+    Loads patterns from centralized dependencies.json manifest with
+    fallback to hardcoded defaults.
 
     Returns:
-        List of C++ file paths to monitor
+        Tuple of (include_patterns, exclude_patterns).
     """
-    files: list[Path] = []
-
     try:
         manifest = DependencyManifest()
-        globs = manifest.get_globs("cpp_lint")
-        excludes = manifest.get_excludes("cpp_lint")
+        include = manifest.get_globs("cpp_lint")
+        exclude = manifest.get_excludes("cpp_lint")
+        # Also monitor linter scripts
+        if "ci/lint_cpp/*.py" not in include:
+            include.append("ci/lint_cpp/*.py")
+        return include, exclude
     except (FileNotFoundError, KeyError):
-        # Fallback to hardcoded patterns if manifest not available
-        globs = [
-            "src/**/*.cpp",
-            "src/**/*.h",
-            "src/**/*.hpp",
-            "src/**/*.c",
-            "examples/**/*.ino",
-            "examples/**/*.cpp",
-            "examples/**/*.h",
-            "examples/**/*.hpp",
-            "tests/**/*.cpp",
-            "tests/**/*.hpp",
-        ]
-        excludes = []
-
-    # Collect all files matching globs
-    for glob_pattern in globs:
-        for file_path in Path(".").glob(glob_pattern):
-            if file_path.is_file():
-                # Check exclusions
-                skip = False
-                for exclude_pattern in excludes:
-                    if exclude_pattern in str(file_path):
-                        skip = True
-                        break
-
-                if not skip:
-                    files.append(file_path)
-
-    # Also monitor linter scripts in ci/lint_cpp/
-    # If linter logic changes, we should re-run linting
-    lint_cpp_dir = Path("ci/lint_cpp")
-    if lint_cpp_dir.exists():
-        for py_file in lint_cpp_dir.glob("*.py"):
-            if py_file.is_file():
-                files.append(py_file)
-
-    files.sort(key=str)
-    return files
+        return list(_DEFAULT_CPP_LINT_GLOBS), []
 
 
 def _get_cpp_lint_cache() -> TwoLayerFingerprintCache:
@@ -86,31 +67,19 @@ def check_cpp_files_changed() -> bool:
     """
     Check if C++ files have changed since the last successful lint run.
 
-    Uses the safe pre-computed fingerprint pattern to avoid race conditions.
+    Uses zccache-fingerprint for blake3-based change detection.
 
     Returns:
         True if files changed and C++ linting should run
         False if no changes detected and linting can be skipped
     """
-    # Get all C++ files to monitor
-    file_paths = get_cpp_files()
+    include, exclude = _get_cpp_lint_patterns()
 
-    if not file_paths:
-        print("🔧 No C++ files found - skipping linting")
-        return False
-
-    # Use the safe pattern: check_needs_update stores fingerprint for later use
     cache = _get_cpp_lint_cache()
-    needs_update = cache.check_needs_update(file_paths)
+    needs_update = cache.check_needs_update(include=include, exclude=exclude)
 
     if needs_update:
         print_cache_miss("C++ files changed - running linting")
-        print(f"   Monitoring {len(file_paths)} files")
-        if len(file_paths) <= 5:
-            for f in file_paths:
-                print(f"     {f}")
-        else:
-            print(f"     {file_paths[0]} ... {file_paths[-1]}")
         return True
     else:
         print_cache_hit("No C++ changes detected - skipping linting")
